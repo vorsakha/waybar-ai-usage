@@ -88,7 +88,7 @@ waybar-ai-usage refresh --notify  # Refresh and show values in a notification
 
 ## Display settings
 
-The popup’s gear page can toggle:
+The popup’s gear page includes a live Waybar preview and can toggle:
 
 - Provider readout or the original single icon
 - Shared colored bot icons or distinct symbols

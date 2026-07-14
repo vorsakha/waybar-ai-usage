@@ -502,6 +502,20 @@ def compact_provider_text(provider_id: str, provider: dict[str, Any] | None, set
     return f'<span foreground="{color}">{icon}</span>{suffix}'
 
 
+def compact_waybar_text(providers: dict[str, Any], settings: dict[str, Any]) -> str:
+    if settings["displayMode"] == "single":
+        return ICON
+    spacing = "  " if settings["providerSpacing"] == "compact" else "   "
+    return spacing.join(
+        compact_provider_text(
+            provider_id,
+            providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None,
+            settings,
+        )
+        for provider_id in ("claude", "codex")
+    )
+
+
 def waybar_output() -> None:
     data = read_json(CACHE_FILE) or empty_cache()
     settings = read_settings()
@@ -521,18 +535,7 @@ def waybar_output() -> None:
     classes = [state]
     if stale:
         classes.append("stale")
-    if settings["displayMode"] == "single":
-        compact_text = ICON
-    else:
-        spacing = "  " if settings["providerSpacing"] == "compact" else "   "
-        compact_text = spacing.join(
-            compact_provider_text(
-                provider_id,
-                providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None,
-                settings,
-            )
-            for provider_id in ("claude", "codex")
-        )
+    compact_text = compact_waybar_text(providers, settings)
     print(json.dumps({
         "text": compact_text,
         "tooltip": "\n".join(tooltip_lines) if settings["showTooltip"] else "",
@@ -593,6 +596,7 @@ def run_popup() -> None:
     .icon-button:hover, .icon-button:focus {{ color: {theme['foreground']}; background: alpha({theme['foreground']}, 0.08); }}
     .divider {{ background: alpha({theme['color8']}, 0.28); min-height: 1px; }}
     .settings-row {{ padding: 3px 0; }}
+    .preview {{ color: {theme['foreground']}; background: {theme['color0']}; border-radius: 8px; padding: 9px 12px; }}
     switch:checked {{ background: {theme['accent']}; }}
     progressbar trough {{ background: {theme['color0']}; border-radius: 999px; min-height: 6px; }}
     progressbar progress {{ background: {theme['accent']}; border-radius: 999px; min-height: 6px; }}
@@ -611,6 +615,7 @@ def run_popup() -> None:
             self.stack: Gtk.Stack | None = None
             self.settings = read_settings()
             self.setting_controls: dict[str, Any] = {}
+            self.preview_label: Gtk.Label | None = None
             self.updating_settings = False
 
         def do_startup(self) -> None:
@@ -729,6 +734,15 @@ def run_popup() -> None:
         def build_settings_panel(self) -> Gtk.Box:
             panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
 
+            preview_title = Gtk.Label(label="Live Waybar preview", xalign=0)
+            preview_title.add_css_class("muted")
+            panel.append(preview_title)
+            self.preview_label = Gtk.Label(xalign=0.5)
+            self.preview_label.set_use_markup(True)
+            self.preview_label.add_css_class("preview")
+            panel.append(self.preview_label)
+            self.update_preview()
+
             display = Gtk.DropDown.new_from_strings(["Providers", "Single icon"])
             display.set_selected(0 if self.settings["displayMode"] == "providers" else 1)
             display.connect(
@@ -793,11 +807,19 @@ def run_popup() -> None:
             panel.append(reset)
             return panel
 
+        def update_preview(self) -> None:
+            if not self.preview_label:
+                return
+            data = read_json(CACHE_FILE) or empty_cache()
+            providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+            self.preview_label.set_markup(compact_waybar_text(providers, self.settings))
+
         def update_setting(self, key: str, value: Any) -> None:
             if self.updating_settings:
                 return
             self.settings[key] = value
             write_settings(self.settings)
+            self.update_preview()
             signal_waybar()
 
         def sync_setting_controls(self) -> None:
@@ -822,6 +844,7 @@ def run_popup() -> None:
             self.settings = dict(DEFAULT_SETTINGS)
             write_settings(self.settings)
             self.sync_setting_controls()
+            self.update_preview()
             signal_waybar()
 
         def toggle_settings(self) -> None:
@@ -837,6 +860,7 @@ def run_popup() -> None:
             else:
                 self.settings = read_settings()
                 self.sync_setting_controls()
+                self.update_preview()
                 self.stack.set_visible_child_name("settings")
                 self.settings_button.set_label("←")
                 self.settings_button.set_tooltip_text("Back to usage")
