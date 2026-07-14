@@ -31,7 +31,7 @@ From an existing clone:
 cd ~/www/personal/waybar-ai-usage && ./install.sh
 ```
 
-Or clone the private repository and install it in one command:
+Or clone the repository and install it in one command:
 
 ```bash
 gh repo clone vorsakha/waybar-ai-usage ~/www/personal/waybar-ai-usage && cd ~/www/personal/waybar-ai-usage && ./install.sh
@@ -92,3 +92,11 @@ The exact module and styles installed by the script are available in [`waybar/mo
 ## Data sources
 
 Claude is read from Anthropic's OAuth usage endpoint. Codex is read from the official `codex app-server` JSON-RPC method `account/rateLimits/read`, the same live data source used for Codex status displays.
+
+## Contributing
+
+Pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the short workflow.
+
+## License
+
+[MIT](LICENSE)
