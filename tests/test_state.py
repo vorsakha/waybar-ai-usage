@@ -43,13 +43,12 @@ class UsageStateTests(unittest.TestCase):
         }
         settings = {
             **usage.DEFAULT_SETTINGS,
-            "iconStyle": "distinct",
             "showPercentages": False,
             "showResetCountdown": True,
         }
         with patch.object(usage.time, "time", return_value=10_000):
             text = usage.compact_provider_text("claude", provider, settings)
-        self.assertIn("✦</span> 1h5m", text)
+        self.assertIn("󰚩</span> 1h5m", text)
         self.assertNotIn("42%", text)
 
     def provider(self, updated_at: float, percent: float, **extra):

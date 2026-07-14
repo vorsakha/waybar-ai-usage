@@ -29,13 +29,8 @@ PROVIDER_DISPLAY = {
     "claude": (ICON, "#D97757"),
     "codex": (ICON, "#10A37F"),
 }
-DISTINCT_PROVIDER_ICONS = {
-    "claude": "✦",
-    "codex": "󰆍",
-}
 DEFAULT_SETTINGS: dict[str, Any] = {
     "displayMode": "providers",
-    "iconStyle": "bot",
     "showPercentages": True,
     "showResetCountdown": True,
     "providerSpacing": "compact",
@@ -67,8 +62,6 @@ def read_settings() -> dict[str, Any]:
     settings = dict(DEFAULT_SETTINGS)
     if stored.get("displayMode") in ("providers", "single"):
         settings["displayMode"] = stored["displayMode"]
-    if stored.get("iconStyle") in ("bot", "distinct"):
-        settings["iconStyle"] = stored["iconStyle"]
     if stored.get("providerSpacing") in ("compact", "comfortable"):
         settings["providerSpacing"] = stored["providerSpacing"]
     for key in ("showPercentages", "showResetCountdown", "showTooltip"):
@@ -481,8 +474,7 @@ def compact_time_remaining(timestamp: Any) -> str:
 
 
 def compact_provider_text(provider_id: str, provider: dict[str, Any] | None, settings: dict[str, Any]) -> str:
-    _default_icon, color = PROVIDER_DISPLAY[provider_id]
-    icon = ICON if settings["iconStyle"] == "bot" else DISTINCT_PROVIDER_ICONS[provider_id]
+    icon, color = PROVIDER_DISPLAY[provider_id]
     windows = provider.get("windows") if isinstance(provider, dict) and isinstance(provider.get("windows"), dict) else {}
     available = [
         window
@@ -754,17 +746,6 @@ def run_popup() -> None:
             self.setting_controls["displayMode"] = display
             panel.append(self.setting_row("Bar layout", "Provider readout or the original icon", display))
 
-            icons = Gtk.DropDown.new_from_strings(["Colored bots", "Distinct symbols"])
-            icons.set_selected(0 if self.settings["iconStyle"] == "bot" else 1)
-            icons.connect(
-                "notify::selected",
-                lambda control, _property: self.update_setting(
-                    "iconStyle", ("bot", "distinct")[control.get_selected()]
-                ),
-            )
-            self.setting_controls["iconStyle"] = icons
-            panel.append(self.setting_row("Provider icons", "Shared bot or alternate symbols", icons))
-
             percentages = Gtk.Switch(active=self.settings["showPercentages"])
             percentages.connect(
                 "notify::active",
@@ -827,9 +808,6 @@ def run_popup() -> None:
             try:
                 self.setting_controls["displayMode"].set_selected(
                     0 if self.settings["displayMode"] == "providers" else 1
-                )
-                self.setting_controls["iconStyle"].set_selected(
-                    0 if self.settings["iconStyle"] == "bot" else 1
                 )
                 self.setting_controls["showPercentages"].set_active(self.settings["showPercentages"])
                 self.setting_controls["showResetCountdown"].set_active(self.settings["showResetCountdown"])

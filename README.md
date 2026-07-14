@@ -91,13 +91,12 @@ waybar-ai-usage refresh --notify  # Refresh and show values in a notification
 The popup’s gear page includes a live Waybar preview and can toggle:
 
 - Provider readout or the original single icon
-- Shared colored bot icons or distinct symbols
 - Percentages
 - Reset countdowns
 - Compact or comfortable provider spacing
 - Hover details
 
-The current design remains the default: provider readout, colored bots, percentages and reset countdowns visible, compact spacing, and hover details disabled. Changes apply immediately and are stored in `~/.config/waybar-ai-usage/settings.json`. **Restore defaults** returns to this state.
+The current design remains the default: provider readout with colored bots, percentages and reset countdowns visible, compact spacing, and hover details disabled. Changes apply immediately and are stored in `~/.config/waybar-ai-usage/settings.json`. **Restore defaults** returns to this state.
 
 ## Manual integration reference
 
