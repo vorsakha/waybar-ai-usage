@@ -580,6 +580,8 @@ def run_popup() -> None:
     .panel {{ background: {theme['background']}; border: 1px solid alpha({theme['color8']}, 0.45); border-radius: 12px; padding: 18px; }}
     .title {{ color: {theme['foreground']}; font-size: 16px; font-weight: 700; }}
     .provider-name {{ color: {theme['foreground']}; font-size: 14px; font-weight: 700; }}
+    .provider-claude {{ color: {PROVIDER_DISPLAY['claude'][1]}; }}
+    .provider-codex {{ color: {PROVIDER_DISPLAY['codex'][1]}; }}
     .label {{ color: {theme['foreground']}; font-size: 12px; }}
     .muted {{ color: {theme['color8']}; font-size: 11px; }}
     .error {{ color: {theme['color1']}; font-size: 11px; }}
@@ -861,18 +863,19 @@ def run_popup() -> None:
                     separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
                     separator.add_css_class("divider")
                     self.providers_box.append(separator)
-                self.providers_box.append(self.provider_section(provider))
+                self.providers_box.append(self.provider_section(provider_id, provider))
                 added += 1
             if not added:
                 loading = Gtk.Label(label="Fetching live quota…", xalign=0)
                 loading.add_css_class("muted")
                 self.providers_box.append(loading)
 
-        def provider_section(self, provider: dict[str, Any]) -> Gtk.Box:
+        def provider_section(self, provider_id: str, provider: dict[str, Any]) -> Gtk.Box:
             section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
             heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             name = Gtk.Label(label=str(provider.get("name", "Provider")), xalign=0)
             name.add_css_class("provider-name")
+            name.add_css_class(f"provider-{provider_id}")
             name.set_hexpand(True)
             heading.append(name)
             plan = provider.get("plan")
