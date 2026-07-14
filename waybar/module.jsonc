@@ -3,7 +3,7 @@
   "return-type": "json",
   "interval": 60,
   "signal": 11,
-  "tooltip": true,
+  "tooltip": false,
   "on-click": "waybar-ai-usage popup",
   "on-click-right": "waybar-ai-usage refresh --notify"
 }
