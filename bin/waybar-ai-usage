@@ -32,7 +32,7 @@ PROVIDER_DISPLAY = {
 DEFAULT_SETTINGS: dict[str, Any] = {
     "displayMode": "providers",
     "showPercentages": True,
-    "showResetCountdown": True,
+    "showResetCountdown": False,
     "providerSpacing": "compact",
     "showTooltip": False,
 }

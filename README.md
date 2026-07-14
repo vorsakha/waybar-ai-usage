@@ -96,7 +96,7 @@ The popup’s gear page includes a live Waybar preview and can toggle:
 - Compact or comfortable provider spacing
 - Hover details
 
-The current design remains the default: provider readout with colored bots, percentages and reset countdowns visible, compact spacing, and hover details disabled. Changes apply immediately and are stored in `~/.config/waybar-ai-usage/settings.json`. **Restore defaults** returns to this state.
+The current design remains the default: provider readout with colored bots, percentages visible, reset countdowns hidden, compact spacing, and hover details disabled. Changes apply immediately and are stored in `~/.config/waybar-ai-usage/settings.json`. **Restore defaults** returns to this state.
 
 ## Manual integration reference
 

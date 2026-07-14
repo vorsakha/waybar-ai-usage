@@ -107,8 +107,10 @@ class UsageStateTests(unittest.TestCase):
         ), patch.object(usage, "spawn_background_refresh"), redirect_stdout(output):
             usage.waybar_output()
         payload = json.loads(output.getvalue())
-        self.assertIn("#D97757\">󰚩</span> 34% · 1d", payload["text"])
-        self.assertIn("#10A37F\">󰚩</span> 56% · 1h5m", payload["text"])
+        self.assertIn("#D97757\">󰚩</span> 34%", payload["text"])
+        self.assertIn("#10A37F\">󰚩</span> 56%", payload["text"])
+        self.assertNotIn("1d", payload["text"])
+        self.assertNotIn("1h5m", payload["text"])
         self.assertEqual(payload["tooltip"], "")
 
         alternate = {**usage.DEFAULT_SETTINGS, "displayMode": "single", "showTooltip": True}
