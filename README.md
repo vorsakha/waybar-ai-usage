@@ -10,6 +10,16 @@ A native Waybar indicator and GTK4 layer-shell popup for live Claude and Codex q
 - Explicit stale and provider-error states
 - Right-click forced refresh with a notification
 
+## Preview
+
+### Waybar indicator
+
+<img src="docs/screenshots/waybar-indicator.png" alt="Claude and Codex usage percentages in Waybar" width="216">
+
+### Usage popup
+
+<img src="docs/screenshots/usage-popup.png" alt="Opened AI usage popup showing Claude and Codex quota windows" width="420">
+
 ## Requirements
 
 - Python 3.11+
