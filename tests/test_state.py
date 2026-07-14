@@ -35,6 +35,28 @@ class UsageStateTests(unittest.TestCase):
                 self.assertEqual(usage.read_settings(), chosen)
                 self.assertEqual(os.stat(settings_file).st_mode & 0o777, 0o600)
 
+    def test_fetch_claude_parses_numeric_and_http_date_retry_after(self):
+        cases = [
+            ("2915", 2_915),
+            ("Thu, 01 Jan 1970 02:00:00 GMT", 6_200),
+        ]
+        credentials = {"claudeAiOauth": {"accessToken": "test-token"}}
+        for header, expected in cases:
+            with self.subTest(header=header):
+                response = usage.urllib.error.HTTPError(
+                    usage.CLAUDE_USAGE_URL,
+                    429,
+                    "rate limited",
+                    {"Retry-After": header},
+                    None,
+                )
+                with patch.object(usage, "read_json", return_value=credentials), patch.object(
+                    usage.urllib.request, "urlopen", side_effect=response
+                ), patch.object(usage.time, "time", return_value=1_000):
+                    with self.assertRaises(usage.UsageRateLimitError) as raised:
+                        usage.fetch_claude()
+                self.assertEqual(raised.exception.retry_after, expected)
+
     def test_compact_provider_options_are_independent(self):
         provider = {
             "windows": {
@@ -58,6 +80,62 @@ class UsageStateTests(unittest.TestCase):
             "windows": {"weekly": {"usedPercent": percent}},
             **extra,
         }
+
+    @patch.object(usage.time, "time", return_value=10_000)
+    def test_refresh_cache_skips_claude_until_hourly_deadline(self, _time):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_dir = Path(temporary)
+            cache_file = cache_dir / "usage.json"
+            lock_file = cache_dir / "refresh.lock"
+            cache_file.write_text(json.dumps({
+                "attemptedAt": 9_000,
+                "providers": {
+                    "claude": self.provider(9_500, 10, nextRefreshAt=12_000),
+                    "codex": self.provider(9_000, 20, nextRefreshAt=9_500),
+                },
+            }))
+            refreshed_codex = self.provider(10_000, 21)
+            with patch.object(usage, "CACHE_DIR", cache_dir), patch.object(
+                usage, "CACHE_FILE", cache_file
+            ), patch.object(usage, "LOCK_FILE", lock_file), patch.object(
+                usage, "fetch_claude"
+            ) as claude, patch.object(
+                usage, "fetch_codex", return_value=refreshed_codex
+            ), patch.object(usage, "signal_waybar"):
+                data, changed = usage.refresh_cache()
+            self.assertTrue(changed)
+            claude.assert_not_called()
+            self.assertEqual(data["providers"]["claude"]["updatedAt"], 9_500)
+            self.assertEqual(data["providers"]["codex"]["windows"]["weekly"]["usedPercent"], 21)
+            self.assertEqual(data["providers"]["codex"]["nextRefreshAt"], 10_600)
+
+    @patch.object(usage.time, "time", return_value=10_000)
+    def test_claude_rate_limit_sets_hourly_backoff_without_discarding_cache(self, _time):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_dir = Path(temporary)
+            cache_file = cache_dir / "usage.json"
+            lock_file = cache_dir / "refresh.lock"
+            cache_file.write_text(json.dumps({
+                "attemptedAt": 9_000,
+                "providers": {
+                    "claude": self.provider(5_000, 10),
+                    "codex": self.provider(9_900, 20, nextRefreshAt=20_000),
+                },
+            }))
+            error = usage.UsageRateLimitError("Claude usage endpoint rate limited", 2_915)
+            with patch.object(usage, "CACHE_DIR", cache_dir), patch.object(
+                usage, "CACHE_FILE", cache_file
+            ), patch.object(usage, "LOCK_FILE", lock_file), patch.object(
+                usage, "fetch_claude", side_effect=error
+            ), patch.object(usage, "fetch_codex") as codex, patch.object(usage, "signal_waybar"):
+                data, _changed = usage.refresh_cache()
+            codex.assert_not_called()
+            claude = data["providers"]["claude"]
+            self.assertEqual(claude["windows"]["weekly"]["usedPercent"], 10)
+            self.assertTrue(claude["rateLimited"])
+            self.assertEqual(claude["nextRefreshAt"], 13_600)
+            self.assertNotIn("stale", claude)
+            self.assertEqual(usage.data_freshness_text(data), "Claude delayed · data 1h ago")
 
     @patch.object(usage.time, "time", return_value=10_000)
     def test_one_stale_provider_marks_whole_indicator_stale(self, _time):

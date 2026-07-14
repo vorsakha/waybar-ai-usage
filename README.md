@@ -6,9 +6,9 @@ A native Waybar indicator and GTK4 layer-shell popup for live Claude and Codex q
 - Click-to-toggle popup centered below the clicked monitor’s bar
 - Claude and Codex 5-hour/weekly usage and reset countdowns
 - Theme colors loaded from the active Omarchy theme
-- Ten-minute cache with background refresh
+- Ten-minute Codex refresh and conservative hourly Claude refresh
 - Explicit stale and provider-error states
-- Right-click forced refresh with a notification
+- Right-click refresh of due providers with a notification
 
 ## Preview
 
@@ -92,7 +92,7 @@ waybar-ai-usage refresh --notify  # Refresh and show values in a notification
 ## Interaction
 
 - **Left click:** toggle popup
-- **Right click:** refresh and notify
+- **Right click:** refresh due providers and notify
 - **Gear button:** open display settings inside the popup
 - **Escape / close button:** dismiss popup
 
@@ -114,7 +114,7 @@ The exact module and styles installed by the script are available in [`waybar/mo
 
 ## Data sources
 
-Claude is read from Anthropic's OAuth usage endpoint. Codex is read from the official `codex app-server` JSON-RPC method `account/rateLimits/read`, the same live data source used for Codex status displays.
+Claude is read from Anthropic's OAuth usage endpoint. Because that endpoint is aggressively rate limited, Claude is polled no more than hourly and the popup clearly notes that its values may be delayed. HTTP `429 Retry-After` responses are persisted and honored. Codex refreshes every ten minutes through the official `codex app-server` JSON-RPC method `account/rateLimits/read`, the same live data source used for Codex status displays.
 
 ## Contributing
 

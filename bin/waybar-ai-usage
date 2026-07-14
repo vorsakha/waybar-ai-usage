@@ -7,6 +7,7 @@ import argparse
 import concurrent.futures
 from ctypes.util import find_library
 import datetime as dt
+from email.utils import parsedate_to_datetime
 import fcntl
 import json
 import os
@@ -37,7 +38,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "showTooltip": False,
 }
 CACHE_MAX_AGE_SECONDS = 600
-STALE_AFTER_SECONDS = 900
+CLAUDE_REFRESH_INTERVAL_SECONDS = 3600
+CODEX_REFRESH_INTERVAL_SECONDS = 600
+CLAUDE_STALE_AFTER_SECONDS = 7200
+CODEX_STALE_AFTER_SECONDS = 1800
 REQUEST_TIMEOUT_SECONDS = 15
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "waybar-ai-usage"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "waybar-ai-usage"
@@ -123,6 +127,28 @@ def make_window(used: Any, duration: Any, resets_at: Any) -> dict[str, Any] | No
     }
 
 
+def parse_retry_after(value: Any, now: float | None = None) -> int | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return max(0, int(value))
+    except ValueError:
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=dt.timezone.utc)
+            remaining = deadline.timestamp() - (time.time() if now is None else now)
+            return max(0, int(remaining + 0.999))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+class UsageRateLimitError(RuntimeError):
+    def __init__(self, message: str, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def fetch_claude() -> dict[str, Any]:
     credentials = read_json(CLAUDE_CREDENTIALS_FILE)
     if not credentials:
@@ -148,6 +174,9 @@ def fetch_claude() -> dict[str, Any]:
     except urllib.error.HTTPError as error:
         if error.code == 401:
             raise RuntimeError("Claude login expired") from error
+        if error.code == 429:
+            retry_after = parse_retry_after(error.headers.get("Retry-After"))
+            raise UsageRateLimitError("Claude usage endpoint rate limited", retry_after) from error
         raise RuntimeError(f"Claude usage request failed (HTTP {error.code})") from error
     if not isinstance(payload, dict):
         raise RuntimeError("Claude returned an invalid response")
@@ -297,6 +326,16 @@ def fetch_codex() -> dict[str, Any]:
     }
 
 
+def provider_refresh_due(provider: Any, interval_seconds: int, now: float) -> bool:
+    if not isinstance(provider, dict):
+        return True
+    next_refresh = provider.get("nextRefreshAt")
+    if isinstance(next_refresh, (int, float)):
+        return now >= next_refresh
+    updated_at = provider.get("updatedAt")
+    return not isinstance(updated_at, (int, float)) or now - updated_at >= interval_seconds
+
+
 def refresh_cache(blocking_lock: bool = True) -> tuple[dict[str, Any], bool]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w") as lock:
@@ -308,29 +347,49 @@ def refresh_cache(blocking_lock: bool = True) -> tuple[dict[str, Any], bool]:
 
         previous = read_json(CACHE_FILE) or empty_cache()
         providers = dict(previous.get("providers", {})) if isinstance(previous.get("providers"), dict) else {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {
-                "claude": executor.submit(fetch_claude),
-                "codex": executor.submit(fetch_codex),
-            }
+        now = time.time()
+        intervals = {
+            "claude": CLAUDE_REFRESH_INTERVAL_SECONDS,
+            "codex": CODEX_REFRESH_INTERVAL_SECONDS,
+        }
+        fetchers = {"claude": fetch_claude, "codex": fetch_codex}
+        due = {
+            provider_id: fetcher
+            for provider_id, fetcher in fetchers.items()
+            if provider_refresh_due(providers.get(provider_id), intervals[provider_id], now)
+        }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(due))) as executor:
+            futures = {provider_id: executor.submit(fetcher) for provider_id, fetcher in due.items()}
             for provider_id, future in futures.items():
+                interval = intervals[provider_id]
                 try:
-                    providers[provider_id] = future.result()
+                    refreshed = future.result()
+                    refreshed["nextRefreshAt"] = now + interval
+                    providers[provider_id] = refreshed
                 except Exception as error:
                     prior = providers.get(provider_id)
-                    if isinstance(prior, dict) and prior.get("windows"):
-                        providers[provider_id] = {**prior, "error": str(error), "stale": True}
+                    base = dict(prior) if isinstance(prior, dict) else {
+                        "name": provider_id.title(),
+                        "updatedAt": None,
+                        "windows": {},
+                    }
+                    base["error"] = str(error)
+                    base["nextRefreshAt"] = now + interval
+                    if isinstance(error, UsageRateLimitError) and provider_id == "claude":
+                        base["rateLimited"] = True
+                        base["nextRefreshAt"] = now + max(interval, error.retry_after or 0)
+                        updated_at = base.get("updatedAt")
+                        if isinstance(updated_at, (int, float)) and now - updated_at <= CLAUDE_STALE_AFTER_SECONDS:
+                            base.pop("stale", None)
+                        else:
+                            base["stale"] = True
                     else:
-                        providers[provider_id] = {
-                            "name": provider_id.title(),
-                            "updatedAt": None,
-                            "windows": {},
-                            "error": str(error),
-                            "stale": True,
-                        }
+                        base.pop("rateLimited", None)
+                        base["stale"] = True
+                    providers[provider_id] = base
         data = {
             "schemaVersion": 1,
-            "attemptedAt": time.time(),
+            "attemptedAt": now,
             "providers": providers,
         }
         write_cache(data)
@@ -392,7 +451,11 @@ def provider_tooltip(provider: dict[str, Any]) -> list[str]:
             lines.append(f"  {label}: {window.get('usedPercent', 0):g}% · {reset_text(window.get('resetsAt'))}")
         else:
             lines.append(f"  {label}: unavailable")
-    if provider.get("error"):
+    if name == "Claude":
+        lines.append("  Polled hourly; values may be delayed")
+    if provider.get("rateLimited"):
+        lines.append(f"  Rate limited; retry in {compact_time_remaining(provider.get('nextRefreshAt'))}")
+    elif provider.get("error"):
         lines.append("  Live refresh failed; showing cached data" if windows else f"  {provider['error']}")
     return lines
 
@@ -410,11 +473,17 @@ def provider_data_timestamps(data: dict[str, Any]) -> list[float]:
 
 def data_freshness_text(data: dict[str, Any]) -> str:
     providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
-    failed = any(isinstance(provider, dict) and provider.get("error") for provider in providers.values())
+    failed = any(
+        isinstance(provider, dict) and provider.get("error") and not provider.get("rateLimited")
+        for provider in providers.values()
+    )
+    rate_limited = any(isinstance(provider, dict) and provider.get("rateLimited") for provider in providers.values())
     timestamps = provider_data_timestamps(data)
     data_age = age_text(min(timestamps)) if timestamps else "unavailable"
     if failed:
         return f"Refresh failed · data {data_age}"
+    if rate_limited:
+        return f"Claude delayed · data {data_age}"
     return f"Updated {data_age}" if timestamps else "Not updated"
 
 
@@ -423,14 +492,15 @@ def usage_state(data: dict[str, Any]) -> tuple[str, float, bool]:
     percents: list[float] = []
     failures = 0
     stale = not providers
-    for provider in providers.values():
+    for provider_id, provider in providers.items():
         if not isinstance(provider, dict):
             stale = True
             continue
         if provider.get("error"):
             failures += 1
         updated_at = provider.get("updatedAt")
-        if provider.get("stale") or not isinstance(updated_at, (int, float)) or time.time() - updated_at > STALE_AFTER_SECONDS:
+        stale_after = CLAUDE_STALE_AFTER_SECONDS if provider_id == "claude" else CODEX_STALE_AFTER_SECONDS
+        if provider.get("stale") or not isinstance(updated_at, (int, float)) or time.time() - updated_at > stale_after:
             stale = True
         windows = provider.get("windows") if isinstance(provider.get("windows"), dict) else {}
         for window in windows.values():
@@ -884,6 +954,10 @@ def run_popup() -> None:
                 badge.add_css_class("badge")
                 heading.append(badge)
             section.append(heading)
+            if provider_id == "claude":
+                cadence = Gtk.Label(label="Polled hourly · values may be delayed", xalign=0)
+                cadence.add_css_class("muted")
+                section.append(cadence)
 
             windows = provider.get("windows") if isinstance(provider.get("windows"), dict) else {}
             for key, label in (("fiveHour", "5 hours"), ("weekly", "Weekly")):
@@ -891,9 +965,15 @@ def run_popup() -> None:
                 section.append(self.window_row(label, window if isinstance(window, dict) else None))
             error = provider.get("error")
             if error:
-                message = "Live refresh failed; cached values shown" if windows else str(error)
+                if provider.get("rateLimited"):
+                    wait = compact_time_remaining(provider.get("nextRefreshAt"))
+                    message = f"Anthropic rate limited checks · retry in {wait}"
+                    style = "muted"
+                else:
+                    message = "Live refresh failed; cached values shown" if windows else str(error)
+                    style = "error"
                 error_label = Gtk.Label(label=message, xalign=0)
-                error_label.add_css_class("error")
+                error_label.add_css_class(style)
                 error_label.set_wrap(True)
                 section.append(error_label)
             return section

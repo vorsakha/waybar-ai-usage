@@ -40,9 +40,10 @@ Runtime state:
 
 ## Data behavior
 
-- Refresh live provider data at most every ten minutes unless the user manually refreshes.
+- Refresh Codex at most every ten minutes and Claude at most hourly, including manual refreshes.
+- Persist and honor Claude `Retry-After` backoff; never let manual refresh bypass it.
 - Provider collection runs concurrently.
-- Failed refreshes retain prior values and clearly mark them stale.
+- Failed refreshes retain prior values and clearly mark them stale or conservatively delayed.
 - Never label cached values as freshly updated after a failed refresh.
 - Keep percentage and reset time tied to the same selected quota window.
 - The Waybar output and settings preview must use the same renderer.
