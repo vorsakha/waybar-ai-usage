@@ -26,8 +26,8 @@ from typing import Any
 APP_ID = "com.vorsakha.WaybarAIUsage"
 ICON = "󰚩"
 PROVIDER_DISPLAY = {
-    "claude": ("✦", "#D97757"),
-    "codex": ("󰆍", "#10A37F"),
+    "claude": (ICON, "#D97757"),
+    "codex": (ICON, "#10A37F"),
 }
 CACHE_MAX_AGE_SECONDS = 300
 STALE_AFTER_SECONDS = 900

@@ -72,8 +72,8 @@ class UsageStateTests(unittest.TestCase):
         ), redirect_stdout(output):
             usage.waybar_output()
         payload = json.loads(output.getvalue())
-        self.assertIn("✦</span> 34% · 1d", payload["text"])
-        self.assertIn("󰆍</span> 56% · 1h5m", payload["text"])
+        self.assertIn("#D97757\">󰚩</span> 34% · 1d", payload["text"])
+        self.assertIn("#10A37F\">󰚩</span> 56% · 1h5m", payload["text"])
 
     @patch.object(usage.time, "time", return_value=10_000)
     def test_high_usage_sets_critical_without_stale(self, _time):
