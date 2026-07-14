@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from ctypes.util import find_library
 import datetime as dt
 import fcntl
 import json
@@ -464,8 +465,8 @@ def read_theme() -> dict[str, str]:
 
 
 def run_popup() -> None:
-    preload = Path("/usr/lib/libgtk4-layer-shell.so")
-    if preload.exists() and os.environ.get("WAYBAR_AI_USAGE_PRELOADED") != "1":
+    preload = find_library("gtk4-layer-shell")
+    if preload and os.environ.get("WAYBAR_AI_USAGE_PRELOADED") != "1":
         environment = os.environ.copy()
         current_preload = environment.get("LD_PRELOAD", "")
         environment["LD_PRELOAD"] = f"{preload}{f':{current_preload}' if current_preload else ''}"
