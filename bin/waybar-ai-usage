@@ -469,7 +469,7 @@ def waybar_output() -> None:
     classes = [state]
     if stale:
         classes.append("stale")
-    compact_text = "   ".join(
+    compact_text = "  ".join(
         compact_provider_text(provider_id, providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None)
         for provider_id in ("claude", "codex")
     )
