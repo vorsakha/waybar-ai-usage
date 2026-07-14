@@ -1,0 +1,9 @@
+"custom/ai-usage": {
+  "exec": "waybar-ai-usage waybar",
+  "return-type": "json",
+  "interval": 60,
+  "signal": 11,
+  "tooltip": true,
+  "on-click": "waybar-ai-usage popup",
+  "on-click-right": "waybar-ai-usage refresh --notify"
+}

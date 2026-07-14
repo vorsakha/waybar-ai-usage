@@ -1,0 +1,737 @@
+#!/usr/bin/env python3
+"""Live Claude and Codex quota indicator for Waybar."""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import datetime as dt
+import fcntl
+import json
+import os
+from pathlib import Path
+import selectors
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tomllib
+import urllib.error
+import urllib.request
+from typing import Any
+
+APP_ID = "com.vorsakha.WaybarAIUsage"
+ICON = "󰚩"
+CACHE_MAX_AGE_SECONDS = 300
+STALE_AFTER_SECONDS = 900
+REQUEST_TIMEOUT_SECONDS = 15
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "waybar-ai-usage"
+CACHE_FILE = CACHE_DIR / "usage.json"
+LOCK_FILE = CACHE_DIR / "refresh.lock"
+CLAUDE_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+THEME_FILE = Path.home() / ".config" / "omarchy" / "current" / "theme" / "colors.toml"
+
+
+def read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_cache(data: dict[str, Any]) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="usage-", suffix=".json", dir=CACHE_DIR)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, separators=(",", ":"))
+            stream.write("\n")
+        os.replace(temporary, CACHE_FILE)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def parse_epoch(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value / 1000 if value > 10_000_000_000 else value)
+    if isinstance(value, str):
+        try:
+            return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def make_window(used: Any, duration: Any, resets_at: Any) -> dict[str, Any] | None:
+    if not isinstance(used, (int, float)) or not isinstance(duration, (int, float)):
+        return None
+    return {
+        "usedPercent": round(float(used), 1),
+        "windowMinutes": int(duration),
+        "resetsAt": parse_epoch(resets_at),
+    }
+
+
+def fetch_claude() -> dict[str, Any]:
+    credentials = read_json(CLAUDE_CREDENTIALS_FILE)
+    if not credentials:
+        raise RuntimeError("Claude OAuth credentials were not found")
+    oauth = credentials.get("claudeAiOauth") or credentials.get("oauth") or credentials
+    if not isinstance(oauth, dict):
+        raise RuntimeError("Claude OAuth credentials are invalid")
+    token = oauth.get("accessToken") or oauth.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("Claude OAuth access token is missing")
+
+    request = urllib.request.Request(
+        CLAUDE_USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "user-agent": "waybar-ai-usage/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            raise RuntimeError("Claude login expired") from error
+        raise RuntimeError(f"Claude usage request failed (HTTP {error.code})") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("Claude returned an invalid response")
+
+    windows: dict[str, Any] = {}
+    five_hour = payload.get("five_hour")
+    weekly = payload.get("seven_day")
+    if isinstance(five_hour, dict):
+        parsed = make_window(five_hour.get("utilization"), 300, five_hour.get("resets_at"))
+        if parsed:
+            windows["fiveHour"] = parsed
+    if isinstance(weekly, dict):
+        parsed = make_window(weekly.get("utilization"), 10_080, weekly.get("resets_at"))
+        if parsed:
+            windows["weekly"] = parsed
+    if not windows:
+        raise RuntimeError("Claude returned no quota windows")
+    return {
+        "name": "Claude",
+        "plan": oauth.get("subscriptionType") if isinstance(oauth.get("subscriptionType"), str) else None,
+        "updatedAt": time.time(),
+        "source": "live Anthropic usage endpoint",
+        "windows": windows,
+    }
+
+
+def stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=1)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def fetch_codex() -> dict[str, Any]:
+    try:
+        process = subprocess.Popen(
+            ["codex", "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise RuntimeError(f"Could not start Codex app-server: {error.strerror or error}") from error
+
+    if process.stdin is None or process.stdout is None:
+        stop_process(process)
+        raise RuntimeError("Codex app-server pipes were unavailable")
+
+    def send(message: dict[str, Any]) -> None:
+        process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+        process.stdin.flush()
+
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+    initialized = False
+    response: dict[str, Any] | None = None
+    try:
+        send({
+            "method": "initialize",
+            "id": 0,
+            "params": {
+                "clientInfo": {
+                    "name": "waybar_ai_usage",
+                    "title": "Waybar AI Usage",
+                    "version": "1.0.0",
+                }
+            },
+        })
+        while time.monotonic() < deadline:
+            ready = selector.select(max(0, deadline - time.monotonic()))
+            if not ready:
+                break
+            line = process.stdout.readline()
+            if not line:
+                if process.poll() is not None:
+                    break
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("id") == 0 and not initialized:
+                initialized = True
+                send({"method": "initialized", "params": {}})
+                send({"method": "account/rateLimits/read", "id": 7})
+            elif message.get("id") == 7:
+                if isinstance(message.get("error"), dict):
+                    reason = message["error"].get("message", "unknown error")
+                    raise RuntimeError(f"Codex rate-limit request failed: {reason}")
+                response = message
+                break
+    except (BrokenPipeError, OSError) as error:
+        raise RuntimeError(f"Could not communicate with Codex app-server: {error}") from error
+    finally:
+        selector.close()
+        stop_process(process)
+
+    if response is None:
+        raise RuntimeError("Codex usage request timed out")
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("Codex returned an invalid response")
+    by_limit = result.get("rateLimitsByLimitId")
+    limits = by_limit.get("codex") if isinstance(by_limit, dict) else None
+    if not isinstance(limits, dict):
+        limits = result.get("rateLimits")
+    if not isinstance(limits, dict):
+        raise RuntimeError("Codex returned no rate-limit data")
+
+    windows: dict[str, Any] = {}
+    for key in ("primary", "secondary"):
+        window = limits.get(key)
+        if not isinstance(window, dict):
+            continue
+        parsed = make_window(window.get("usedPercent"), window.get("windowDurationMins"), window.get("resetsAt"))
+        if not parsed:
+            continue
+        if parsed["windowMinutes"] == 300:
+            windows["fiveHour"] = parsed
+        elif parsed["windowMinutes"] == 10_080:
+            windows["weekly"] = parsed
+    if not windows:
+        raise RuntimeError("Codex returned no 5-hour or weekly quota windows")
+    return {
+        "name": "Codex",
+        "plan": limits.get("planType") if isinstance(limits.get("planType"), str) else None,
+        "updatedAt": time.time(),
+        "source": "live Codex app-server endpoint",
+        "windows": windows,
+    }
+
+
+def refresh_cache(blocking_lock: bool = True) -> tuple[dict[str, Any], bool]:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with LOCK_FILE.open("w") as lock:
+        flags = fcntl.LOCK_EX | (0 if blocking_lock else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock, flags)
+        except BlockingIOError:
+            return read_json(CACHE_FILE) or empty_cache(), False
+
+        previous = read_json(CACHE_FILE) or empty_cache()
+        providers = dict(previous.get("providers", {})) if isinstance(previous.get("providers"), dict) else {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                "claude": executor.submit(fetch_claude),
+                "codex": executor.submit(fetch_codex),
+            }
+            for provider_id, future in futures.items():
+                try:
+                    providers[provider_id] = future.result()
+                except Exception as error:
+                    prior = providers.get(provider_id)
+                    if isinstance(prior, dict) and prior.get("windows"):
+                        providers[provider_id] = {**prior, "error": str(error), "stale": True}
+                    else:
+                        providers[provider_id] = {
+                            "name": provider_id.title(),
+                            "updatedAt": None,
+                            "windows": {},
+                            "error": str(error),
+                            "stale": True,
+                        }
+        data = {
+            "schemaVersion": 1,
+            "attemptedAt": time.time(),
+            "providers": providers,
+        }
+        write_cache(data)
+    signal_waybar()
+    return data, True
+
+
+def empty_cache() -> dict[str, Any]:
+    return {"schemaVersion": 1, "attemptedAt": None, "providers": {}}
+
+
+def signal_waybar() -> None:
+    try:
+        subprocess.run(["pkill", "-RTMIN+11", "waybar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def age_text(timestamp: Any) -> str:
+    if not isinstance(timestamp, (int, float)):
+        return "never"
+    seconds = max(0, int(time.time() - timestamp))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86_400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86_400}d ago"
+
+
+def reset_text(timestamp: Any) -> str:
+    if not isinstance(timestamp, (int, float)):
+        return "Reset time unavailable"
+    seconds = int(timestamp - time.time())
+    absolute = dt.datetime.fromtimestamp(timestamp).strftime("%a %H:%M")
+    if seconds <= 0:
+        return f"Reset was {absolute}"
+    minutes = max(1, seconds // 60)
+    days, remainder = divmod(minutes, 1440)
+    hours, mins = divmod(remainder, 60)
+    if days:
+        relative = f"{days}d {hours}h" if hours else f"{days}d"
+    elif hours:
+        relative = f"{hours}h {mins}m" if mins else f"{hours}h"
+    else:
+        relative = f"{mins}m"
+    return f"Resets in {relative} · {absolute}"
+
+
+def provider_tooltip(provider: dict[str, Any]) -> list[str]:
+    name = str(provider.get("name", "Provider"))
+    plan = provider.get("plan")
+    lines = [f"{name}{f' ({plan})' if plan else ''}"]
+    windows = provider.get("windows") if isinstance(provider.get("windows"), dict) else {}
+    for key, label in (("fiveHour", "5 hours"), ("weekly", "Weekly")):
+        window = windows.get(key)
+        if isinstance(window, dict):
+            lines.append(f"  {label}: {window.get('usedPercent', 0):g}% · {reset_text(window.get('resetsAt'))}")
+        else:
+            lines.append(f"  {label}: unavailable")
+    if provider.get("error"):
+        lines.append("  Live refresh failed; showing cached data" if windows else f"  {provider['error']}")
+    return lines
+
+
+def provider_data_timestamps(data: dict[str, Any]) -> list[float]:
+    providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    return [
+        float(provider["updatedAt"])
+        for provider in providers.values()
+        if isinstance(provider, dict)
+        and provider.get("windows")
+        and isinstance(provider.get("updatedAt"), (int, float))
+    ]
+
+
+def data_freshness_text(data: dict[str, Any]) -> str:
+    providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    failed = any(isinstance(provider, dict) and provider.get("error") for provider in providers.values())
+    timestamps = provider_data_timestamps(data)
+    data_age = age_text(min(timestamps)) if timestamps else "unavailable"
+    if failed:
+        return f"Refresh failed · data {data_age}"
+    return f"Updated {data_age}" if timestamps else "Not updated"
+
+
+def usage_state(data: dict[str, Any]) -> tuple[str, float, bool]:
+    providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    percents: list[float] = []
+    failures = 0
+    stale = not providers
+    for provider in providers.values():
+        if not isinstance(provider, dict):
+            stale = True
+            continue
+        if provider.get("error"):
+            failures += 1
+        updated_at = provider.get("updatedAt")
+        if provider.get("stale") or not isinstance(updated_at, (int, float)) or time.time() - updated_at > STALE_AFTER_SECONDS:
+            stale = True
+        windows = provider.get("windows") if isinstance(provider.get("windows"), dict) else {}
+        for window in windows.values():
+            if isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float)):
+                percents.append(float(window["usedPercent"]))
+    highest = max(percents, default=0)
+    if failures and failures >= max(1, len(providers)) and not percents:
+        return "error", highest, stale
+    if highest >= 90:
+        return "critical", highest, stale
+    if highest >= 75:
+        return "warning", highest, stale
+    return "normal", highest, stale
+
+
+def spawn_background_refresh() -> None:
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "refresh", "--background"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
+def waybar_output() -> None:
+    data = read_json(CACHE_FILE) or empty_cache()
+    attempted = data.get("attemptedAt")
+    if not isinstance(attempted, (int, float)) or time.time() - attempted > CACHE_MAX_AGE_SECONDS:
+        spawn_background_refresh()
+
+    providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    tooltip_lines = ["AI usage"]
+    for provider_id in ("claude", "codex"):
+        provider = providers.get(provider_id)
+        if isinstance(provider, dict):
+            tooltip_lines.extend(["", *provider_tooltip(provider)])
+    if not providers:
+        tooltip_lines.extend(["", "Loading live quota…"])
+    state, highest, stale = usage_state(data)
+    classes = [state]
+    if stale:
+        classes.append("stale")
+    print(json.dumps({
+        "text": ICON,
+        "tooltip": "\n".join(tooltip_lines),
+        "class": classes,
+        "percentage": round(highest),
+    }, ensure_ascii=False))
+
+
+def read_theme() -> dict[str, str]:
+    defaults = {
+        "background": "#121212",
+        "foreground": "#bebebe",
+        "accent": "#e68e0d",
+        "color0": "#333333",
+        "color1": "#D35F5F",
+        "color2": "#FFC107",
+        "color8": "#8a8a8d",
+    }
+    try:
+        with THEME_FILE.open("rb") as stream:
+            theme = tomllib.load(stream)
+        for key in defaults:
+            if isinstance(theme.get(key), str):
+                defaults[key] = theme[key]
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+    return defaults
+
+
+def run_popup() -> None:
+    preload = Path("/usr/lib/libgtk4-layer-shell.so")
+    if preload.exists() and os.environ.get("WAYBAR_AI_USAGE_PRELOADED") != "1":
+        environment = os.environ.copy()
+        current_preload = environment.get("LD_PRELOAD", "")
+        environment["LD_PRELOAD"] = f"{preload}{f':{current_preload}' if current_preload else ''}"
+        environment["WAYBAR_AI_USAGE_PRELOADED"] = "1"
+        os.execvpe(sys.executable, [sys.executable, *sys.argv], environment)
+
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    gi.require_version("Gtk4LayerShell", "1.0")
+    from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell
+
+    theme = read_theme()
+    css = f"""
+    * {{ font-family: 'JetBrainsMono Nerd Font'; }}
+    window {{ background: transparent; }}
+    .panel {{ background: {theme['background']}; border: 1px solid alpha({theme['color8']}, 0.45); border-radius: 12px; padding: 18px; }}
+    .title {{ color: {theme['foreground']}; font-size: 16px; font-weight: 700; }}
+    .provider-name {{ color: {theme['foreground']}; font-size: 14px; font-weight: 700; }}
+    .label {{ color: {theme['foreground']}; font-size: 12px; }}
+    .muted {{ color: {theme['color8']}; font-size: 11px; }}
+    .error {{ color: {theme['color1']}; font-size: 11px; }}
+    .badge {{ color: {theme['accent']}; background: alpha({theme['accent']}, 0.12); border-radius: 999px; padding: 2px 7px; font-size: 10px; }}
+    .icon-button {{ color: {theme['color8']}; background: transparent; border: 0; border-radius: 8px; padding: 4px 8px; min-width: 20px; min-height: 20px; box-shadow: none; }}
+    .icon-button:hover, .icon-button:focus {{ color: {theme['foreground']}; background: alpha({theme['foreground']}, 0.08); }}
+    .divider {{ background: alpha({theme['color8']}, 0.28); min-height: 1px; }}
+    progressbar trough {{ background: {theme['color0']}; border-radius: 999px; min-height: 6px; }}
+    progressbar progress {{ background: {theme['accent']}; border-radius: 999px; min-height: 6px; }}
+    progressbar.warning progress {{ background: {theme['color2']}; }}
+    progressbar.critical progress {{ background: {theme['color1']}; }}
+    """
+
+    class UsageApplication(Gtk.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+            self.window: Gtk.ApplicationWindow | None = None
+            self.providers_box: Gtk.Box | None = None
+            self.freshness: Gtk.Label | None = None
+            self.refresh_button: Gtk.Button | None = None
+
+        def do_startup(self) -> None:
+            Gtk.Application.do_startup(self)
+            provider = Gtk.CssProvider()
+            provider.load_from_data(css.encode())
+            display = Gdk.Display.get_default()
+            if display:
+                Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        def do_activate(self) -> None:
+            if self.window and self.window.get_visible():
+                self.window.close()
+                self.quit()
+                return
+            self.window = self.build_window()
+            self.window.present()
+            data = read_json(CACHE_FILE) or empty_cache()
+            self.render(data)
+            attempted = data.get("attemptedAt")
+            if not isinstance(attempted, (int, float)) or time.time() - attempted > CACHE_MAX_AGE_SECONDS:
+                self.refresh()
+
+        def build_window(self) -> Gtk.ApplicationWindow:
+            window = Gtk.ApplicationWindow(application=self)
+            window.set_title("AI usage")
+            window.set_decorated(False)
+            window.set_resizable(False)
+            window.set_default_size(420, -1)
+            Gtk4LayerShell.init_for_window(window)
+            Gtk4LayerShell.set_namespace(window, "waybar-ai-usage")
+            output_name = os.environ.get("WAYBAR_OUTPUT_NAME")
+            display = Gdk.Display.get_default()
+            if output_name and display:
+                monitors = display.get_monitors()
+                for index in range(monitors.get_n_items()):
+                    monitor = monitors.get_item(index)
+                    if monitor and monitor.get_connector() == output_name:
+                        Gtk4LayerShell.set_monitor(window, monitor)
+                        break
+            Gtk4LayerShell.set_layer(window, Gtk4LayerShell.Layer.OVERLAY)
+            Gtk4LayerShell.set_anchor(window, Gtk4LayerShell.Edge.TOP, True)
+            Gtk4LayerShell.set_margin(window, Gtk4LayerShell.Edge.TOP, 8)
+            Gtk4LayerShell.set_keyboard_mode(window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
+
+            panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+            panel.add_css_class("panel")
+            panel.set_size_request(420, -1)
+            window.set_child(panel)
+
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            title = Gtk.Label(label=f"{ICON}  AI usage", xalign=0)
+            title.add_css_class("title")
+            title.set_hexpand(True)
+            header.append(title)
+            self.freshness = Gtk.Label(label="", xalign=1)
+            self.freshness.add_css_class("muted")
+            header.append(self.freshness)
+            self.refresh_button = Gtk.Button(label="↻")
+            self.refresh_button.add_css_class("icon-button")
+            self.refresh_button.set_tooltip_text("Refresh usage")
+            self.refresh_button.connect("clicked", lambda _button: self.refresh())
+            header.append(self.refresh_button)
+            close = Gtk.Button(label="×")
+            close.add_css_class("icon-button")
+            close.set_tooltip_text("Close")
+            close.connect("clicked", lambda _button: window.close())
+            header.append(close)
+            panel.append(header)
+
+            divider = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+            divider.add_css_class("divider")
+            panel.append(divider)
+
+            self.providers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+            panel.append(self.providers_box)
+
+            keys = Gtk.EventControllerKey()
+            keys.connect("key-pressed", self.on_key)
+            window.add_controller(keys)
+            return window
+
+        def on_key(self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> bool:
+            if keyval == Gdk.KEY_Escape and self.window:
+                self.window.close()
+                return True
+            return False
+
+        def render(self, data: dict[str, Any]) -> None:
+            if not self.providers_box or not self.freshness:
+                return
+            while child := self.providers_box.get_first_child():
+                self.providers_box.remove(child)
+            self.freshness.set_text(data_freshness_text(data))
+            providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+            added = 0
+            for provider_id in ("claude", "codex"):
+                provider = providers.get(provider_id)
+                if not isinstance(provider, dict):
+                    continue
+                if added:
+                    separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+                    separator.add_css_class("divider")
+                    self.providers_box.append(separator)
+                self.providers_box.append(self.provider_section(provider))
+                added += 1
+            if not added:
+                loading = Gtk.Label(label="Fetching live quota…", xalign=0)
+                loading.add_css_class("muted")
+                self.providers_box.append(loading)
+
+        def provider_section(self, provider: dict[str, Any]) -> Gtk.Box:
+            section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
+            heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            name = Gtk.Label(label=str(provider.get("name", "Provider")), xalign=0)
+            name.add_css_class("provider-name")
+            name.set_hexpand(True)
+            heading.append(name)
+            plan = provider.get("plan")
+            if plan:
+                badge = Gtk.Label(label=str(plan))
+                badge.add_css_class("badge")
+                heading.append(badge)
+            section.append(heading)
+
+            windows = provider.get("windows") if isinstance(provider.get("windows"), dict) else {}
+            for key, label in (("fiveHour", "5 hours"), ("weekly", "Weekly")):
+                window = windows.get(key)
+                section.append(self.window_row(label, window if isinstance(window, dict) else None))
+            error = provider.get("error")
+            if error:
+                message = "Live refresh failed; cached values shown" if windows else str(error)
+                error_label = Gtk.Label(label=message, xalign=0)
+                error_label.add_css_class("error")
+                error_label.set_wrap(True)
+                section.append(error_label)
+            return section
+
+        def window_row(self, label: str, window: dict[str, Any] | None) -> Gtk.Box:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            label_widget = Gtk.Label(label=label, xalign=0)
+            label_widget.add_css_class("label")
+            label_widget.set_hexpand(True)
+            top.append(label_widget)
+            if window:
+                percent = float(window.get("usedPercent", 0))
+                value = Gtk.Label(label=f"{percent:g}% used", xalign=1)
+                value.add_css_class("label")
+                top.append(value)
+                row.append(top)
+                progress = Gtk.ProgressBar()
+                progress.set_fraction(max(0, min(100, percent)) / 100)
+                if percent >= 90:
+                    progress.add_css_class("critical")
+                elif percent >= 75:
+                    progress.add_css_class("warning")
+                row.append(progress)
+                reset = Gtk.Label(label=reset_text(window.get("resetsAt")), xalign=0)
+                reset.add_css_class("muted")
+                row.append(reset)
+            else:
+                unavailable = Gtk.Label(label="Unavailable", xalign=1)
+                unavailable.add_css_class("muted")
+                top.append(unavailable)
+                row.append(top)
+            return row
+
+        def refresh(self) -> None:
+            if self.refresh_button:
+                self.refresh_button.set_sensitive(False)
+            if self.freshness:
+                self.freshness.set_text("Refreshing…")
+
+            def work() -> None:
+                data, _changed = refresh_cache()
+                GLib.idle_add(self.finish_refresh, data)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def finish_refresh(self, data: dict[str, Any]) -> bool:
+            if self.refresh_button:
+                self.refresh_button.set_sensitive(True)
+            self.render(data)
+            return GLib.SOURCE_REMOVE
+
+    app = UsageApplication()
+    app.run([sys.argv[0]])
+
+
+def notify(message: str, urgency: str = "low") -> None:
+    try:
+        subprocess.run(["notify-send", "-u", urgency, "AI usage", message], timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def refresh_command(args: argparse.Namespace) -> None:
+    data, changed = refresh_cache(blocking_lock=not args.background)
+    if args.notify:
+        providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+        lines: list[str] = []
+        for provider_id in ("claude", "codex"):
+            provider = providers.get(provider_id)
+            if isinstance(provider, dict):
+                lines.extend(provider_tooltip(provider))
+                lines.append("")
+        notify("\n".join(lines).strip() if lines else "Usage data unavailable", "low" if changed else "normal")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Claude and Codex usage for Waybar")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("waybar", help="Print Waybar JSON")
+    refresh_parser = subparsers.add_parser("refresh", help="Refresh cached usage")
+    refresh_parser.add_argument("--notify", action="store_true", help="Show the refreshed values in a notification")
+    refresh_parser.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
+    subparsers.add_parser("popup", help="Toggle the native usage popup")
+    args = parser.parse_args()
+
+    if args.command == "waybar":
+        waybar_output()
+    elif args.command == "refresh":
+        refresh_command(args)
+    elif args.command == "popup":
+        run_popup()
+
+
+if __name__ == "__main__":
+    main()

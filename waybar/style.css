@@ -1,0 +1,17 @@
+#custom-ai-usage {
+  min-width: 12px;
+  margin: 0 7.5px;
+}
+
+#custom-ai-usage.warning {
+  color: #FFC107;
+}
+
+#custom-ai-usage.critical,
+#custom-ai-usage.error {
+  color: #D35F5F;
+}
+
+#custom-ai-usage.stale {
+  opacity: 0.65;
+}
