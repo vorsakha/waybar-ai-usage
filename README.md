@@ -83,7 +83,21 @@ waybar-ai-usage refresh --notify  # Refresh and show values in a notification
 
 - **Left click:** toggle popup
 - **Right click:** refresh and notify
+- **Gear button:** open display settings inside the popup
 - **Escape / close button:** dismiss popup
+
+## Display settings
+
+The popup’s gear page can toggle:
+
+- Provider readout or the original single icon
+- Shared colored bot icons or distinct symbols
+- Percentages
+- Reset countdowns
+- Compact or comfortable provider spacing
+- Hover details
+
+The current design remains the default: provider readout, colored bots, percentages and reset countdowns visible, compact spacing, and hover details disabled. Changes apply immediately and are stored in `~/.config/waybar-ai-usage/settings.json`. **Restore defaults** returns to this state.
 
 ## Manual integration reference
 

@@ -29,11 +29,25 @@ PROVIDER_DISPLAY = {
     "claude": (ICON, "#D97757"),
     "codex": (ICON, "#10A37F"),
 }
+DISTINCT_PROVIDER_ICONS = {
+    "claude": "✦",
+    "codex": "󰆍",
+}
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "displayMode": "providers",
+    "iconStyle": "bot",
+    "showPercentages": True,
+    "showResetCountdown": True,
+    "providerSpacing": "compact",
+    "showTooltip": False,
+}
 CACHE_MAX_AGE_SECONDS = 300
 STALE_AFTER_SECONDS = 900
 REQUEST_TIMEOUT_SECONDS = 15
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "waybar-ai-usage"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "waybar-ai-usage"
 CACHE_FILE = CACHE_DIR / "usage.json"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
 LOCK_FILE = CACHE_DIR / "refresh.lock"
 CLAUDE_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -46,6 +60,37 @@ def read_json(path: Path) -> dict[str, Any] | None:
         return value if isinstance(value, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def read_settings() -> dict[str, Any]:
+    stored = read_json(SETTINGS_FILE) or {}
+    settings = dict(DEFAULT_SETTINGS)
+    if stored.get("displayMode") in ("providers", "single"):
+        settings["displayMode"] = stored["displayMode"]
+    if stored.get("iconStyle") in ("bot", "distinct"):
+        settings["iconStyle"] = stored["iconStyle"]
+    if stored.get("providerSpacing") in ("compact", "comfortable"):
+        settings["providerSpacing"] = stored["providerSpacing"]
+    for key in ("showPercentages", "showResetCountdown", "showTooltip"):
+        if isinstance(stored.get(key), bool):
+            settings[key] = stored[key]
+    return settings
+
+
+def write_settings(settings: dict[str, Any]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="settings-", suffix=".json", dir=CONFIG_DIR)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({key: settings[key] for key in DEFAULT_SETTINGS}, stream, indent=2)
+            stream.write("\n")
+        os.replace(temporary, SETTINGS_FILE)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def write_cache(data: dict[str, Any]) -> None:
@@ -435,24 +480,31 @@ def compact_time_remaining(timestamp: Any) -> str:
     return f"{mins}m" if mins else "now"
 
 
-def compact_provider_text(provider_id: str, provider: dict[str, Any] | None) -> str:
-    icon, color = PROVIDER_DISPLAY[provider_id]
+def compact_provider_text(provider_id: str, provider: dict[str, Any] | None, settings: dict[str, Any]) -> str:
+    _default_icon, color = PROVIDER_DISPLAY[provider_id]
+    icon = ICON if settings["iconStyle"] == "bot" else DISTINCT_PROVIDER_ICONS[provider_id]
     windows = provider.get("windows") if isinstance(provider, dict) and isinstance(provider.get("windows"), dict) else {}
     available = [
         window
         for window in windows.values()
         if isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float))
     ]
+    parts: list[str] = []
     if available:
         active = max(available, key=lambda window: float(window["usedPercent"]))
-        value = f'{float(active["usedPercent"]):g}% · {compact_time_remaining(active.get("resetsAt"))}'
-    else:
-        value = "--"
-    return f'<span foreground="{color}">{icon}</span> {value}'
+        if settings["showPercentages"]:
+            parts.append(f'{float(active["usedPercent"]):g}%')
+        if settings["showResetCountdown"]:
+            parts.append(compact_time_remaining(active.get("resetsAt")))
+    elif settings["showPercentages"] or settings["showResetCountdown"]:
+        parts.append("--")
+    suffix = f" {' · '.join(parts)}" if parts else ""
+    return f'<span foreground="{color}">{icon}</span>{suffix}'
 
 
 def waybar_output() -> None:
     data = read_json(CACHE_FILE) or empty_cache()
+    settings = read_settings()
     attempted = data.get("attemptedAt")
     if not isinstance(attempted, (int, float)) or time.time() - attempted > CACHE_MAX_AGE_SECONDS:
         spawn_background_refresh()
@@ -469,13 +521,21 @@ def waybar_output() -> None:
     classes = [state]
     if stale:
         classes.append("stale")
-    compact_text = "  ".join(
-        compact_provider_text(provider_id, providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None)
-        for provider_id in ("claude", "codex")
-    )
+    if settings["displayMode"] == "single":
+        compact_text = ICON
+    else:
+        spacing = "  " if settings["providerSpacing"] == "compact" else "   "
+        compact_text = spacing.join(
+            compact_provider_text(
+                provider_id,
+                providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None,
+                settings,
+            )
+            for provider_id in ("claude", "codex")
+        )
     print(json.dumps({
         "text": compact_text,
-        "tooltip": "\n".join(tooltip_lines),
+        "tooltip": "\n".join(tooltip_lines) if settings["showTooltip"] else "",
         "class": classes,
         "percentage": round(highest),
     }, ensure_ascii=False))
@@ -532,6 +592,8 @@ def run_popup() -> None:
     .icon-button {{ color: {theme['color8']}; background: transparent; border: 0; border-radius: 8px; padding: 4px 8px; min-width: 20px; min-height: 20px; box-shadow: none; }}
     .icon-button:hover, .icon-button:focus {{ color: {theme['foreground']}; background: alpha({theme['foreground']}, 0.08); }}
     .divider {{ background: alpha({theme['color8']}, 0.28); min-height: 1px; }}
+    .settings-row {{ padding: 3px 0; }}
+    switch:checked {{ background: {theme['accent']}; }}
     progressbar trough {{ background: {theme['color0']}; border-radius: 999px; min-height: 6px; }}
     progressbar progress {{ background: {theme['accent']}; border-radius: 999px; min-height: 6px; }}
     progressbar.warning progress {{ background: {theme['color2']}; }}
@@ -545,6 +607,11 @@ def run_popup() -> None:
             self.providers_box: Gtk.Box | None = None
             self.freshness: Gtk.Label | None = None
             self.refresh_button: Gtk.Button | None = None
+            self.settings_button: Gtk.Button | None = None
+            self.stack: Gtk.Stack | None = None
+            self.settings = read_settings()
+            self.setting_controls: dict[str, Any] = {}
+            self.updating_settings = False
 
         def do_startup(self) -> None:
             Gtk.Application.do_startup(self)
@@ -607,6 +674,11 @@ def run_popup() -> None:
             self.refresh_button.set_tooltip_text("Refresh usage")
             self.refresh_button.connect("clicked", lambda _button: self.refresh())
             header.append(self.refresh_button)
+            self.settings_button = Gtk.Button(label="⚙")
+            self.settings_button.add_css_class("icon-button")
+            self.settings_button.set_tooltip_text("Display settings")
+            self.settings_button.connect("clicked", lambda _button: self.toggle_settings())
+            header.append(self.settings_button)
             close = Gtk.Button(label="×")
             close.add_css_class("icon-button")
             close.set_tooltip_text("Close")
@@ -618,8 +690,14 @@ def run_popup() -> None:
             divider.add_css_class("divider")
             panel.append(divider)
 
+            self.stack = Gtk.Stack()
+            self.stack.set_hhomogeneous(True)
+            self.stack.set_vhomogeneous(False)
             self.providers_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-            panel.append(self.providers_box)
+            self.stack.add_named(self.providers_box, "usage")
+            self.stack.add_named(self.build_settings_panel(), "settings")
+            self.stack.set_visible_child_name("usage")
+            panel.append(self.stack)
 
             keys = Gtk.EventControllerKey()
             keys.connect("key-pressed", self.on_key)
@@ -631,6 +709,139 @@ def run_popup() -> None:
                 self.window.close()
                 return True
             return False
+
+        def setting_row(self, title: str, description: str, control: Gtk.Widget) -> Gtk.Box:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+            row.add_css_class("settings-row")
+            copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            copy.set_hexpand(True)
+            label = Gtk.Label(label=title, xalign=0)
+            label.add_css_class("label")
+            copy.append(label)
+            detail = Gtk.Label(label=description, xalign=0)
+            detail.add_css_class("muted")
+            copy.append(detail)
+            row.append(copy)
+            control.set_valign(Gtk.Align.CENTER)
+            row.append(control)
+            return row
+
+        def build_settings_panel(self) -> Gtk.Box:
+            panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+
+            display = Gtk.DropDown.new_from_strings(["Providers", "Single icon"])
+            display.set_selected(0 if self.settings["displayMode"] == "providers" else 1)
+            display.connect(
+                "notify::selected",
+                lambda control, _property: self.update_setting(
+                    "displayMode", ("providers", "single")[control.get_selected()]
+                ),
+            )
+            self.setting_controls["displayMode"] = display
+            panel.append(self.setting_row("Bar layout", "Provider readout or the original icon", display))
+
+            icons = Gtk.DropDown.new_from_strings(["Colored bots", "Distinct symbols"])
+            icons.set_selected(0 if self.settings["iconStyle"] == "bot" else 1)
+            icons.connect(
+                "notify::selected",
+                lambda control, _property: self.update_setting(
+                    "iconStyle", ("bot", "distinct")[control.get_selected()]
+                ),
+            )
+            self.setting_controls["iconStyle"] = icons
+            panel.append(self.setting_row("Provider icons", "Shared bot or alternate symbols", icons))
+
+            percentages = Gtk.Switch(active=self.settings["showPercentages"])
+            percentages.connect(
+                "notify::active",
+                lambda control, _property: self.update_setting("showPercentages", control.get_active()),
+            )
+            self.setting_controls["showPercentages"] = percentages
+            panel.append(self.setting_row("Percentages", "Show the most-used active window", percentages))
+
+            countdown = Gtk.Switch(active=self.settings["showResetCountdown"])
+            countdown.connect(
+                "notify::active",
+                lambda control, _property: self.update_setting("showResetCountdown", control.get_active()),
+            )
+            self.setting_controls["showResetCountdown"] = countdown
+            panel.append(self.setting_row("Reset countdown", "Show time remaining beside usage", countdown))
+
+            tooltip = Gtk.Switch(active=self.settings["showTooltip"])
+            tooltip.connect(
+                "notify::active",
+                lambda control, _property: self.update_setting("showTooltip", control.get_active()),
+            )
+            self.setting_controls["showTooltip"] = tooltip
+            panel.append(self.setting_row("Hover details", "Show quota details without clicking", tooltip))
+
+            spacing = Gtk.DropDown.new_from_strings(["Compact", "Comfortable"])
+            spacing.set_selected(0 if self.settings["providerSpacing"] == "compact" else 1)
+            spacing.connect(
+                "notify::selected",
+                lambda control, _property: self.update_setting(
+                    "providerSpacing", ("compact", "comfortable")[control.get_selected()]
+                ),
+            )
+            self.setting_controls["providerSpacing"] = spacing
+            panel.append(self.setting_row("Provider spacing", "Compact is the current default", spacing))
+
+            reset = Gtk.Button(label="Restore defaults")
+            reset.add_css_class("icon-button")
+            reset.set_halign(Gtk.Align.END)
+            reset.connect("clicked", lambda _button: self.restore_defaults())
+            panel.append(reset)
+            return panel
+
+        def update_setting(self, key: str, value: Any) -> None:
+            if self.updating_settings:
+                return
+            self.settings[key] = value
+            write_settings(self.settings)
+            signal_waybar()
+
+        def sync_setting_controls(self) -> None:
+            self.updating_settings = True
+            try:
+                self.setting_controls["displayMode"].set_selected(
+                    0 if self.settings["displayMode"] == "providers" else 1
+                )
+                self.setting_controls["iconStyle"].set_selected(
+                    0 if self.settings["iconStyle"] == "bot" else 1
+                )
+                self.setting_controls["showPercentages"].set_active(self.settings["showPercentages"])
+                self.setting_controls["showResetCountdown"].set_active(self.settings["showResetCountdown"])
+                self.setting_controls["showTooltip"].set_active(self.settings["showTooltip"])
+                self.setting_controls["providerSpacing"].set_selected(
+                    0 if self.settings["providerSpacing"] == "compact" else 1
+                )
+            finally:
+                self.updating_settings = False
+
+        def restore_defaults(self) -> None:
+            self.settings = dict(DEFAULT_SETTINGS)
+            write_settings(self.settings)
+            self.sync_setting_controls()
+            signal_waybar()
+
+        def toggle_settings(self) -> None:
+            if not self.stack or not self.settings_button or not self.refresh_button or not self.freshness:
+                return
+            showing_settings = self.stack.get_visible_child_name() == "settings"
+            if showing_settings:
+                self.stack.set_visible_child_name("usage")
+                self.settings_button.set_label("⚙")
+                self.settings_button.set_tooltip_text("Display settings")
+                self.refresh_button.set_visible(True)
+                self.freshness.set_visible(True)
+            else:
+                self.settings = read_settings()
+                self.sync_setting_controls()
+                self.stack.set_visible_child_name("settings")
+                self.settings_button.set_label("←")
+                self.settings_button.set_tooltip_text("Back to usage")
+                self.refresh_button.set_visible(False)
+                self.freshness.set_visible(False)
 
         def render(self, data: dict[str, Any]) -> None:
             if not self.providers_box or not self.freshness:
