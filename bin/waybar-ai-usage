@@ -25,6 +25,10 @@ from typing import Any
 
 APP_ID = "com.vorsakha.WaybarAIUsage"
 ICON = "󰚩"
+PROVIDER_DISPLAY = {
+    "claude": ("✦", "#D97757"),
+    "codex": ("󰆍", "#10A37F"),
+}
 CACHE_MAX_AGE_SECONDS = 300
 STALE_AFTER_SECONDS = 900
 REQUEST_TIMEOUT_SECONDS = 15
@@ -417,6 +421,18 @@ def spawn_background_refresh() -> None:
         pass
 
 
+def compact_provider_text(provider_id: str, provider: dict[str, Any] | None) -> str:
+    icon, color = PROVIDER_DISPLAY[provider_id]
+    windows = provider.get("windows") if isinstance(provider, dict) and isinstance(provider.get("windows"), dict) else {}
+    percentages = [
+        float(window["usedPercent"])
+        for window in windows.values()
+        if isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float))
+    ]
+    value = f"{max(percentages):g}%" if percentages else "--"
+    return f'<span foreground="{color}">{icon}</span> {value}'
+
+
 def waybar_output() -> None:
     data = read_json(CACHE_FILE) or empty_cache()
     attempted = data.get("attemptedAt")
@@ -435,8 +451,12 @@ def waybar_output() -> None:
     classes = [state]
     if stale:
         classes.append("stale")
+    compact_text = "   ".join(
+        compact_provider_text(provider_id, providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None)
+        for provider_id in ("claude", "codex")
+    )
     print(json.dumps({
-        "text": ICON,
+        "text": compact_text,
         "tooltip": "\n".join(tooltip_lines),
         "class": classes,
         "percentage": round(highest),

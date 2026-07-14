@@ -1,6 +1,9 @@
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+from contextlib import redirect_stdout
+import io
+import json
 import unittest
 from unittest.mock import patch
 
@@ -44,6 +47,30 @@ class UsageStateTests(unittest.TestCase):
         }
         self.assertEqual(usage.data_freshness_text(data), "Refresh failed · data 2m ago")
         self.assertTrue(usage.usage_state(data)[2])
+
+    @patch.object(usage.time, "time", return_value=10_000)
+    def test_waybar_text_shows_each_provider_highest_percentage(self, _time):
+        data = {
+            "attemptedAt": 9_990,
+            "providers": {
+                "claude": {
+                    **self.provider(9_990, 12),
+                    "windows": {
+                        "fiveHour": {"usedPercent": 12},
+                        "weekly": {"usedPercent": 34},
+                    },
+                },
+                "codex": self.provider(9_990, 56),
+            },
+        }
+        output = io.StringIO()
+        with patch.object(usage, "read_json", return_value=data), patch.object(
+            usage, "spawn_background_refresh"
+        ), redirect_stdout(output):
+            usage.waybar_output()
+        payload = json.loads(output.getvalue())
+        self.assertIn("✦</span> 34%", payload["text"])
+        self.assertIn("󰆍</span> 56%", payload["text"])
 
     @patch.object(usage.time, "time", return_value=10_000)
     def test_high_usage_sets_critical_without_stale(self, _time):

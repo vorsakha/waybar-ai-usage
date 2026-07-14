@@ -2,7 +2,7 @@
 
 A native Waybar indicator and GTK4 layer-shell popup for live Claude and Codex quota.
 
-- Calm single-icon Waybar module
+- At-a-glance Claude and Codex icons with each provider’s highest active usage percentage
 - Click-to-toggle popup centered below the clicked monitor’s bar
 - Claude and Codex 5-hour/weekly usage and reset countdowns
 - Theme colors loaded from the active Omarchy theme
