@@ -36,7 +36,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "providerSpacing": "compact",
     "showTooltip": False,
 }
-CACHE_MAX_AGE_SECONDS = 300
+CACHE_MAX_AGE_SECONDS = 600
 STALE_AFTER_SECONDS = 900
 REQUEST_TIMEOUT_SECONDS = 15
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "waybar-ai-usage"

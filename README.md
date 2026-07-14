@@ -6,7 +6,7 @@ A native Waybar indicator and GTK4 layer-shell popup for live Claude and Codex q
 - Click-to-toggle popup centered below the clicked monitor’s bar
 - Claude and Codex 5-hour/weekly usage and reset countdowns
 - Theme colors loaded from the active Omarchy theme
-- Five-minute cache with background refresh
+- Ten-minute cache with background refresh
 - Explicit stale and provider-error states
 - Right-click forced refresh with a notification
 
