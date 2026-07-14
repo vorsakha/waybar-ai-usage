@@ -56,11 +56,14 @@ class UsageStateTests(unittest.TestCase):
                 "claude": {
                     **self.provider(9_990, 12),
                     "windows": {
-                        "fiveHour": {"usedPercent": 12},
-                        "weekly": {"usedPercent": 34},
+                        "fiveHour": {"usedPercent": 12, "resetsAt": 11_800},
+                        "weekly": {"usedPercent": 34, "resetsAt": 97_000},
                     },
                 },
-                "codex": self.provider(9_990, 56),
+                "codex": {
+                    **self.provider(9_990, 56),
+                    "windows": {"weekly": {"usedPercent": 56, "resetsAt": 13_900}},
+                },
             },
         }
         output = io.StringIO()
@@ -69,8 +72,8 @@ class UsageStateTests(unittest.TestCase):
         ), redirect_stdout(output):
             usage.waybar_output()
         payload = json.loads(output.getvalue())
-        self.assertIn("✦</span> 34%", payload["text"])
-        self.assertIn("󰆍</span> 56%", payload["text"])
+        self.assertIn("✦</span> 34% · 1d", payload["text"])
+        self.assertIn("󰆍</span> 56% · 1h5m", payload["text"])
 
     @patch.object(usage.time, "time", return_value=10_000)
     def test_high_usage_sets_critical_without_stale(self, _time):
