@@ -25,6 +25,12 @@ SNIPPET = '''"custom/ai-usage": {
 
 
 class InstallerTests(unittest.TestCase):
+    def test_shipped_module_does_not_depend_on_session_path(self):
+        module = (Path(__file__).parents[1] / "waybar" / "module.jsonc").read_text()
+        self.assertIn('"exec": "$HOME/.local/bin/waybar-ai-usage waybar"', module)
+        self.assertIn('"on-click": "$HOME/.local/bin/waybar-ai-usage popup"', module)
+        self.assertIn('"on-click-right": "$HOME/.local/bin/waybar-ai-usage refresh --notify"', module)
+
     def sample(self):
         return '''{
   // Waybar comment

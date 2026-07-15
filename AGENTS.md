@@ -69,6 +69,7 @@ Treat installer changes as high risk.
 - Preserve valid JSONC comments, strings, and unrelated formatting.
 - Never patch raw structural characters without the comment/string-aware scanner.
 - Keep installation idempotent.
+- Waybar commands must use `$HOME/.local/bin/waybar-ai-usage`; do not rely on `~/.local/bin` being in the boot session `PATH`.
 - Refuse ambiguous duplicate module entries.
 - Never overwrite unmanaged files or configuration fragments.
 - Create a collision-safe backup before every real mutation.
