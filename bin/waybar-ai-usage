@@ -321,7 +321,7 @@ def stop_process(process: subprocess.Popen[Any]) -> None:
 def fetch_codex() -> dict[str, Any]:
     try:
         process = subprocess.Popen(
-            ["codex", "app-server", "--stdio"],
+            ["codex", "app-server"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

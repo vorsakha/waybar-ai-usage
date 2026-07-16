@@ -160,6 +160,12 @@ class UsageStateTests(unittest.TestCase):
         self.assertFalse(usage.provider_refresh_due(rate_limit, 3_600, 10_000, force=True))
         self.assertTrue(usage.provider_refresh_due(rate_limit, 3_600, 12_001, force=True))
 
+    def test_fetch_codex_uses_default_stdio_transport_for_version_compatibility(self):
+        with patch.object(usage.subprocess, "Popen", side_effect=OSError("missing")) as popen:
+            with self.assertRaisesRegex(RuntimeError, "Could not start Codex app-server"):
+                usage.fetch_codex()
+        self.assertEqual(popen.call_args.args[0], ["codex", "app-server"])
+
     def test_only_transient_codex_errors_use_fast_retry(self):
         transient = usage.CodexTransientError("Codex usage request timed out")
         permanent = RuntimeError("Codex returned an invalid response")

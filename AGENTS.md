@@ -36,6 +36,7 @@ Runtime state:
 - Keep cache and settings files permissioned `0600`.
 - Do not add network endpoints beyond the documented Claude and Codex usage sources without explicit approval.
 - Codex app-server processes must terminate on success, error, and timeout.
+- Start Codex app-server without `--stdio`; stdio is the default transport across both older boot-resolved and current Codex CLI versions.
 - Do not weaken GitHub secret scanning, push protection, branch protection, or SHA-pinned Actions.
 
 ## Data behavior
