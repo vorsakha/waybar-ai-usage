@@ -8,7 +8,7 @@ A native Waybar indicator and GTK4 layer-shell popup for live Claude and Codex q
 - Theme colors loaded from the active Omarchy theme
 - Ten-minute Codex refresh and conservative hourly Claude refresh
 - Explicit stale and provider-error states
-- Right-click refresh of due providers with a notification
+- Right-click manual retry with a notification; active Anthropic rate-limit backoff remains enforced
 
 ## Preview
 
@@ -92,7 +92,7 @@ waybar-ai-usage refresh --notify  # Refresh and show values in a notification
 ## Interaction
 
 - **Left click:** toggle popup
-- **Right click:** refresh due providers and notify
+- **Right click:** retry providers and notify; Anthropic rate-limit backoff is never bypassed
 - **Gear button:** open display settings inside the popup
 - **Escape / close button:** dismiss popup
 
@@ -114,7 +114,7 @@ The exact module and styles installed by the script are available in [`waybar/mo
 
 ## Data sources
 
-Claude is read from Anthropic's OAuth usage endpoint. Because that endpoint is aggressively rate limited, Claude is polled no more than hourly and the popup clearly notes that its values may be delayed. HTTP `429 Retry-After` responses are persisted and honored. Codex refreshes every ten minutes through the official `codex app-server` JSON-RPC method `account/rateLimits/read`, the same live data source used for Codex status displays.
+Claude is read from Anthropic's OAuth usage endpoint. Because that endpoint is aggressively rate limited, Claude is polled no more than hourly and the popup clearly notes that its values may be delayed. HTTP `429 Retry-After` responses are persisted and honored. If Claude Code's access token expires, the popup asks you to open Claude Code to renew the session rather than modifying OAuth credentials itself. Codex refreshes every ten minutes through the official `codex app-server` JSON-RPC method `account/rateLimits/read`, the same live data source used for Codex status displays. Transient Codex failures retry after one minute, which lets the module recover when Waybar starts before login services or networking are ready.
 
 ## Contributing
 

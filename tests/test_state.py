@@ -2,6 +2,7 @@ from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from contextlib import redirect_stdout
+import argparse
 import io
 import json
 import os
@@ -56,6 +57,21 @@ class UsageStateTests(unittest.TestCase):
                     with self.assertRaises(usage.UsageRateLimitError) as raised:
                         usage.fetch_claude()
                 self.assertEqual(raised.exception.retry_after, expected)
+                if raised.exception.__cause__:
+                    raised.exception.__cause__.close()
+                    raised.exception.__cause__ = None
+
+    def test_fetch_claude_marks_unauthorized_session_expired(self):
+        credentials = {"claudeAiOauth": {"accessToken": "expired-token"}}
+        response = usage.urllib.error.HTTPError(usage.CLAUDE_USAGE_URL, 401, "unauthorized", {}, None)
+        with patch.object(usage, "read_json", return_value=credentials), patch.object(
+            usage.urllib.request, "urlopen", side_effect=response
+        ):
+            with self.assertRaisesRegex(usage.UsageAuthError, "session expired") as raised:
+                usage.fetch_claude()
+        if raised.exception.__cause__:
+            raised.exception.__cause__.close()
+            raised.exception.__cause__ = None
 
     def test_compact_provider_options_are_independent(self):
         provider = {
@@ -80,6 +96,37 @@ class UsageStateTests(unittest.TestCase):
             "windows": {"weekly": {"usedPercent": percent}},
             **extra,
         }
+
+    def test_manual_force_bypasses_errors_but_not_active_rate_limit(self):
+        ordinary_error = self.provider(9_000, 10, error="offline", nextRefreshAt=12_000)
+        rate_limit = self.provider(9_000, 10, rateLimited=True, backoffUntil=12_000, nextRefreshAt=13_600)
+        self.assertTrue(usage.provider_refresh_due(ordinary_error, 3_600, 10_000, force=True))
+        self.assertFalse(usage.provider_refresh_due(rate_limit, 3_600, 10_000, force=True))
+        self.assertTrue(usage.provider_refresh_due(rate_limit, 3_600, 12_001, force=True))
+
+    def test_only_transient_codex_errors_use_fast_retry(self):
+        transient = usage.CodexTransientError("Codex usage request timed out")
+        permanent = RuntimeError("Codex returned an invalid response")
+        self.assertEqual(usage.provider_error_retry_seconds("codex", transient, 600), 60)
+        self.assertEqual(usage.provider_error_retry_seconds("codex", permanent, 600), 600)
+        self.assertTrue(usage.codex_error_is_transient("error sending request for url"))
+        self.assertFalse(usage.codex_error_is_transient("unknown JSON-RPC method"))
+
+    def test_cache_refresh_due_uses_provider_deadlines_not_global_attempt_time(self):
+        data = {
+            "attemptedAt": 10_000,
+            "providers": {
+                "claude": self.provider(9_900, 10, nextRefreshAt=20_000),
+                "codex": self.provider(9_900, 20, error="timeout", nextRefreshAt=9_999),
+            },
+        }
+        self.assertTrue(usage.cache_refresh_due(data, now=10_000))
+
+    def test_manual_refresh_command_forces_due_check(self):
+        args = argparse.Namespace(background=False, notify=False)
+        with patch.object(usage, "refresh_cache", return_value=(usage.empty_cache(), True)) as refresh:
+            usage.refresh_command(args)
+        refresh.assert_called_once_with(blocking_lock=True, force=True)
 
     @patch.object(usage.time, "time", return_value=10_000)
     def test_refresh_cache_skips_claude_until_hourly_deadline(self, _time):
@@ -133,9 +180,38 @@ class UsageStateTests(unittest.TestCase):
             claude = data["providers"]["claude"]
             self.assertEqual(claude["windows"]["weekly"]["usedPercent"], 10)
             self.assertTrue(claude["rateLimited"])
+            self.assertEqual(claude["backoffUntil"], 12_915)
             self.assertEqual(claude["nextRefreshAt"], 13_600)
+            self.assertTrue(usage.provider_refresh_due(claude, 3_600, 13_000, force=True))
             self.assertNotIn("stale", claude)
             self.assertEqual(usage.data_freshness_text(data), "Claude delayed · data 1h ago")
+
+    @patch.object(usage.time, "time", return_value=10_000)
+    def test_claude_auth_failure_is_actionable_and_codex_timeout_retries_quickly(self, _time):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_dir = Path(temporary)
+            cache_file = cache_dir / "usage.json"
+            lock_file = cache_dir / "refresh.lock"
+            cache_file.write_text(json.dumps({
+                "providers": {
+                    "claude": self.provider(5_000, 10),
+                    "codex": self.provider(5_000, 20),
+                },
+            }))
+            with patch.object(usage, "CACHE_DIR", cache_dir), patch.object(
+                usage, "CACHE_FILE", cache_file
+            ), patch.object(usage, "LOCK_FILE", lock_file), patch.object(
+                usage, "fetch_claude", side_effect=usage.UsageAuthError("Claude session expired")
+            ), patch.object(
+                usage, "fetch_codex", side_effect=usage.CodexTransientError("Codex usage request timed out")
+            ), patch.object(usage, "signal_waybar"):
+                data, _changed = usage.refresh_cache()
+            claude = data["providers"]["claude"]
+            codex = data["providers"]["codex"]
+            self.assertTrue(claude["authExpired"])
+            self.assertEqual(claude["nextRefreshAt"], 13_600)
+            self.assertEqual(codex["nextRefreshAt"], 10_060)
+            self.assertIn("open Claude Code", usage.provider_tooltip(claude)[-1])
 
     @patch.object(usage.time, "time", return_value=10_000)
     def test_one_stale_provider_marks_whole_indicator_stale(self, _time):

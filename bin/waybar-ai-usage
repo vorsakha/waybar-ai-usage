@@ -37,11 +37,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "providerSpacing": "compact",
     "showTooltip": False,
 }
-CACHE_MAX_AGE_SECONDS = 600
 CLAUDE_REFRESH_INTERVAL_SECONDS = 3600
 CODEX_REFRESH_INTERVAL_SECONDS = 600
 CLAUDE_STALE_AFTER_SECONDS = 7200
 CODEX_STALE_AFTER_SECONDS = 1800
+CODEX_ERROR_RETRY_SECONDS = 60
 REQUEST_TIMEOUT_SECONDS = 15
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "waybar-ai-usage"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "waybar-ai-usage"
@@ -143,10 +143,26 @@ def parse_retry_after(value: Any, now: float | None = None) -> int | None:
             return None
 
 
+class UsageAuthError(RuntimeError):
+    pass
+
+
 class UsageRateLimitError(RuntimeError):
     def __init__(self, message: str, retry_after: int | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class CodexTransientError(RuntimeError):
+    pass
+
+
+def codex_error_is_transient(reason: str) -> bool:
+    lowered = reason.lower()
+    return any(
+        marker in lowered
+        for marker in ("timed out", "timeout", "connection", "network", "sending request", "temporarily", "unavailable")
+    )
 
 
 def fetch_claude() -> dict[str, Any]:
@@ -173,7 +189,7 @@ def fetch_claude() -> dict[str, Any]:
             payload = json.load(response)
     except urllib.error.HTTPError as error:
         if error.code == 401:
-            raise RuntimeError("Claude login expired") from error
+            raise UsageAuthError("Claude session expired") from error
         if error.code == 429:
             retry_after = parse_retry_after(error.headers.get("Retry-After"))
             raise UsageRateLimitError("Claude usage endpoint rate limited", retry_after) from error
@@ -281,18 +297,19 @@ def fetch_codex() -> dict[str, Any]:
                 send({"method": "account/rateLimits/read", "id": 7})
             elif message.get("id") == 7:
                 if isinstance(message.get("error"), dict):
-                    reason = message["error"].get("message", "unknown error")
-                    raise RuntimeError(f"Codex rate-limit request failed: {reason}")
+                    reason = str(message["error"].get("message", "unknown error"))
+                    error_type = CodexTransientError if codex_error_is_transient(reason) else RuntimeError
+                    raise error_type(f"Codex rate-limit request failed: {reason}")
                 response = message
                 break
     except (BrokenPipeError, OSError) as error:
-        raise RuntimeError(f"Could not communicate with Codex app-server: {error}") from error
+        raise CodexTransientError(f"Could not communicate with Codex app-server: {error}") from error
     finally:
         selector.close()
         stop_process(process)
 
     if response is None:
-        raise RuntimeError("Codex usage request timed out")
+        raise CodexTransientError("Codex usage request timed out")
     result = response.get("result")
     if not isinstance(result, dict):
         raise RuntimeError("Codex returned an invalid response")
@@ -326,17 +343,40 @@ def fetch_codex() -> dict[str, Any]:
     }
 
 
-def provider_refresh_due(provider: Any, interval_seconds: int, now: float) -> bool:
+def provider_refresh_due(provider: Any, interval_seconds: int, now: float, force: bool = False) -> bool:
     if not isinstance(provider, dict):
         return True
     next_refresh = provider.get("nextRefreshAt")
+    backoff_until = provider.get("backoffUntil")
+    if provider.get("rateLimited") and not isinstance(backoff_until, (int, float)):
+        backoff_until = next_refresh
+    if force and not (isinstance(backoff_until, (int, float)) and now < backoff_until):
+        return True
     if isinstance(next_refresh, (int, float)):
         return now >= next_refresh
     updated_at = provider.get("updatedAt")
     return not isinstance(updated_at, (int, float)) or now - updated_at >= interval_seconds
 
 
-def refresh_cache(blocking_lock: bool = True) -> tuple[dict[str, Any], bool]:
+def provider_error_retry_seconds(provider_id: str, error: Exception, interval: int) -> int:
+    if provider_id == "codex" and isinstance(error, CodexTransientError):
+        return CODEX_ERROR_RETRY_SECONDS
+    return interval
+
+
+def cache_refresh_due(data: dict[str, Any], now: float | None = None) -> bool:
+    current_time = time.time() if now is None else now
+    providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    return any(
+        provider_refresh_due(providers.get(provider_id), interval, current_time)
+        for provider_id, interval in (
+            ("claude", CLAUDE_REFRESH_INTERVAL_SECONDS),
+            ("codex", CODEX_REFRESH_INTERVAL_SECONDS),
+        )
+    )
+
+
+def refresh_cache(blocking_lock: bool = True, force: bool = False) -> tuple[dict[str, Any], bool]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w") as lock:
         flags = fcntl.LOCK_EX | (0 if blocking_lock else fcntl.LOCK_NB)
@@ -356,7 +396,7 @@ def refresh_cache(blocking_lock: bool = True) -> tuple[dict[str, Any], bool]:
         due = {
             provider_id: fetcher
             for provider_id, fetcher in fetchers.items()
-            if provider_refresh_due(providers.get(provider_id), intervals[provider_id], now)
+            if provider_refresh_due(providers.get(provider_id), intervals[provider_id], now, force=force)
         }
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(due))) as executor:
             futures = {provider_id: executor.submit(fetcher) for provider_id, fetcher in due.items()}
@@ -377,6 +417,8 @@ def refresh_cache(blocking_lock: bool = True) -> tuple[dict[str, Any], bool]:
                     base["nextRefreshAt"] = now + interval
                     if isinstance(error, UsageRateLimitError) and provider_id == "claude":
                         base["rateLimited"] = True
+                        base.pop("authExpired", None)
+                        base["backoffUntil"] = now + (error.retry_after if error.retry_after is not None else interval)
                         base["nextRefreshAt"] = now + max(interval, error.retry_after or 0)
                         updated_at = base.get("updatedAt")
                         if isinstance(updated_at, (int, float)) and now - updated_at <= CLAUDE_STALE_AFTER_SECONDS:
@@ -385,6 +427,12 @@ def refresh_cache(blocking_lock: bool = True) -> tuple[dict[str, Any], bool]:
                             base["stale"] = True
                     else:
                         base.pop("rateLimited", None)
+                        base.pop("backoffUntil", None)
+                        if isinstance(error, UsageAuthError) and provider_id == "claude":
+                            base["authExpired"] = True
+                        else:
+                            base.pop("authExpired", None)
+                        base["nextRefreshAt"] = now + provider_error_retry_seconds(provider_id, error, interval)
                         base["stale"] = True
                     providers[provider_id] = base
         data = {
@@ -454,7 +502,9 @@ def provider_tooltip(provider: dict[str, Any]) -> list[str]:
     if name == "Claude":
         lines.append("  Polled hourly; values may be delayed")
     if provider.get("rateLimited"):
-        lines.append(f"  Rate limited; retry in {compact_time_remaining(provider.get('nextRefreshAt'))}")
+        lines.append(f"  Rate limited; retry in {compact_time_remaining(provider.get('backoffUntil') or provider.get('nextRefreshAt'))}")
+    elif provider.get("authExpired"):
+        lines.append("  Session expired; open Claude Code, then refresh")
     elif provider.get("error"):
         lines.append("  Live refresh failed; showing cached data" if windows else f"  {provider['error']}")
     return lines
@@ -474,14 +524,20 @@ def provider_data_timestamps(data: dict[str, Any]) -> list[float]:
 def data_freshness_text(data: dict[str, Any]) -> str:
     providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
     failed = any(
-        isinstance(provider, dict) and provider.get("error") and not provider.get("rateLimited")
+        isinstance(provider, dict)
+        and provider.get("error")
+        and not provider.get("rateLimited")
+        and not provider.get("authExpired")
         for provider in providers.values()
     )
+    auth_expired = any(isinstance(provider, dict) and provider.get("authExpired") for provider in providers.values())
     rate_limited = any(isinstance(provider, dict) and provider.get("rateLimited") for provider in providers.values())
     timestamps = provider_data_timestamps(data)
     data_age = age_text(min(timestamps)) if timestamps else "unavailable"
     if failed:
         return f"Refresh failed · data {data_age}"
+    if auth_expired:
+        return f"Claude session expired · data {data_age}"
     if rate_limited:
         return f"Claude delayed · data {data_age}"
     return f"Updated {data_age}" if timestamps else "Not updated"
@@ -581,8 +637,7 @@ def compact_waybar_text(providers: dict[str, Any], settings: dict[str, Any]) -> 
 def waybar_output() -> None:
     data = read_json(CACHE_FILE) or empty_cache()
     settings = read_settings()
-    attempted = data.get("attemptedAt")
-    if not isinstance(attempted, (int, float)) or time.time() - attempted > CACHE_MAX_AGE_SECONDS:
+    if cache_refresh_due(data):
         spawn_background_refresh()
 
     providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
@@ -699,9 +754,8 @@ def run_popup() -> None:
             self.window.present()
             data = read_json(CACHE_FILE) or empty_cache()
             self.render(data)
-            attempted = data.get("attemptedAt")
-            if not isinstance(attempted, (int, float)) or time.time() - attempted > CACHE_MAX_AGE_SECONDS:
-                self.refresh()
+            if cache_refresh_due(data):
+                self.refresh(force=False)
 
         def build_window(self) -> Gtk.ApplicationWindow:
             window = Gtk.ApplicationWindow(application=self)
@@ -741,7 +795,7 @@ def run_popup() -> None:
             self.refresh_button = Gtk.Button(label="↻")
             self.refresh_button.add_css_class("icon-button")
             self.refresh_button.set_tooltip_text("Refresh usage")
-            self.refresh_button.connect("clicked", lambda _button: self.refresh())
+            self.refresh_button.connect("clicked", lambda _button: self.refresh(force=True))
             header.append(self.refresh_button)
             self.settings_button = Gtk.Button(label="⚙")
             self.settings_button.add_css_class("icon-button")
@@ -966,9 +1020,12 @@ def run_popup() -> None:
             error = provider.get("error")
             if error:
                 if provider.get("rateLimited"):
-                    wait = compact_time_remaining(provider.get("nextRefreshAt"))
+                    wait = compact_time_remaining(provider.get("backoffUntil") or provider.get("nextRefreshAt"))
                     message = f"Anthropic rate limited checks · retry in {wait}"
                     style = "muted"
+                elif provider.get("authExpired"):
+                    message = "Session expired · open Claude Code, then refresh"
+                    style = "error"
                 else:
                     message = "Live refresh failed; cached values shown" if windows else str(error)
                     style = "error"
@@ -1008,14 +1065,14 @@ def run_popup() -> None:
                 row.append(top)
             return row
 
-        def refresh(self) -> None:
+        def refresh(self, force: bool) -> None:
             if self.refresh_button:
                 self.refresh_button.set_sensitive(False)
             if self.freshness:
                 self.freshness.set_text("Refreshing…")
 
             def work() -> None:
-                data, _changed = refresh_cache()
+                data, _changed = refresh_cache(force=force)
                 GLib.idle_add(self.finish_refresh, data)
 
             threading.Thread(target=work, daemon=True).start()
@@ -1038,7 +1095,7 @@ def notify(message: str, urgency: str = "low") -> None:
 
 
 def refresh_command(args: argparse.Namespace) -> None:
-    data, changed = refresh_cache(blocking_lock=not args.background)
+    data, changed = refresh_cache(blocking_lock=not args.background, force=not args.background)
     if args.notify:
         providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
         lines: list[str] = []
