@@ -6,9 +6,11 @@ import argparse
 import io
 import json
 import os
+import sys
 import tempfile
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).parents[1] / "bin" / "waybar-ai-usage"
 loader = SourceFileLoader("waybar_ai_usage", str(SCRIPT))
@@ -73,6 +75,60 @@ class UsageStateTests(unittest.TestCase):
             raised.exception.__cause__.close()
             raised.exception.__cause__ = None
 
+    def test_claude_session_renewal_uses_safe_background_cli(self):
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(usage, "claude_credential_state", side_effect=[(1, 1), (2, 20_000)]), patch.object(
+            usage.pty, "openpty", return_value=(10, 11)
+        ), patch.object(
+            usage.subprocess, "Popen", return_value=process
+        ) as popen, patch.object(
+            usage.os, "close"
+        ), patch.object(
+            usage.os, "set_blocking"
+        ), patch.object(
+            usage.os, "read", side_effect=BlockingIOError
+        ), patch.object(
+            usage.time, "monotonic", side_effect=[0, 0]
+        ), patch.object(
+            usage.time, "time", return_value=10
+        ), patch.object(usage, "stop_process") as stop:
+            self.assertTrue(usage.renew_claude_session_with_cli())
+        self.assertEqual(popen.call_args.args[0], ["claude", "--safe-mode"])
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        stop.assert_called_once_with(process)
+
+    def test_stop_process_kills_children_after_session_leader_exits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "child-ready"
+            child_code = (
+                "import pathlib,signal,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"pathlib.Path({str(marker)!r}).touch(); "
+                "time.sleep(60)"
+            )
+            leader_code = (
+                "import os,subprocess,sys,time; "
+                f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+                "child.returncode=0; "
+                f"marker={str(marker)!r}; "
+                "exec('while not os.path.exists(marker):\\n time.sleep(0.01)')"
+            )
+            process = usage.subprocess.Popen([sys.executable, "-c", leader_code], start_new_session=True)
+            try:
+                process.wait(timeout=3)
+                self.assertTrue(usage.process_group_exists(process.pid))
+                usage.stop_process(process)
+                deadline = time.time() + 2
+                while usage.process_group_exists(process.pid) and time.time() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse(usage.process_group_exists(process.pid))
+            finally:
+                try:
+                    usage.os.killpg(process.pid, usage.signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_compact_provider_options_are_independent(self):
         provider = {
             "windows": {
@@ -127,6 +183,35 @@ class UsageStateTests(unittest.TestCase):
         with patch.object(usage, "refresh_cache", return_value=(usage.empty_cache(), True)) as refresh:
             usage.refresh_command(args)
         refresh.assert_called_once_with(blocking_lock=True, force=True)
+
+    @patch.object(usage.time, "time", return_value=10_000)
+    def test_manual_refresh_renews_expired_claude_session_and_retries(self, _time):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_dir = Path(temporary)
+            cache_file = cache_dir / "usage.json"
+            lock_file = cache_dir / "refresh.lock"
+            cache_file.write_text(json.dumps({
+                "providers": {
+                    "claude": self.provider(5_000, 10, authExpired=True, nextRefreshAt=20_000),
+                    "codex": self.provider(9_900, 20, nextRefreshAt=20_000),
+                },
+            }))
+            refreshed_claude = self.provider(10_000, 11)
+            refreshed_codex = self.provider(10_000, 21)
+            with patch.object(usage, "CACHE_DIR", cache_dir), patch.object(
+                usage, "CACHE_FILE", cache_file
+            ), patch.object(usage, "LOCK_FILE", lock_file), patch.object(
+                usage, "fetch_claude", side_effect=[usage.UsageAuthError("Claude session expired"), refreshed_claude]
+            ) as claude, patch.object(
+                usage, "renew_claude_session_with_cli", return_value=True
+            ) as renew, patch.object(
+                usage, "fetch_codex", return_value=refreshed_codex
+            ), patch.object(usage, "signal_waybar"):
+                data, _changed = usage.refresh_cache(force=True)
+            renew.assert_called_once_with()
+            self.assertEqual(claude.call_count, 2)
+            self.assertNotIn("authExpired", data["providers"]["claude"])
+            self.assertEqual(data["providers"]["claude"]["windows"]["weekly"]["usedPercent"], 11)
 
     @patch.object(usage.time, "time", return_value=10_000)
     def test_refresh_cache_skips_claude_until_hourly_deadline(self, _time):

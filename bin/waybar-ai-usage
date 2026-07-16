@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import pty
 import selectors
 import signal
 import subprocess
@@ -42,6 +43,7 @@ CODEX_REFRESH_INTERVAL_SECONDS = 600
 CLAUDE_STALE_AFTER_SECONDS = 7200
 CODEX_STALE_AFTER_SECONDS = 1800
 CODEX_ERROR_RETRY_SECONDS = 60
+CLAUDE_SESSION_RENEW_TIMEOUT_SECONDS = 15
 REQUEST_TIMEOUT_SECONDS = 15
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "waybar-ai-usage"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "waybar-ai-usage"
@@ -219,22 +221,101 @@ def fetch_claude() -> dict[str, Any]:
     }
 
 
-def stop_process(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
+def claude_credential_state() -> tuple[int, int | float | None] | None:
+    credentials = read_json(CLAUDE_CREDENTIALS_FILE)
+    if not credentials:
+        return None
+    oauth = credentials.get("claudeAiOauth") or credentials.get("oauth") or credentials
+    if not isinstance(oauth, dict):
+        return None
+    expires_at = oauth.get("expiresAt") or oauth.get("expires_at")
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        modified = CLAUDE_CREDENTIALS_FILE.stat().st_mtime_ns
+    except OSError:
+        return None
+    return modified, expires_at if isinstance(expires_at, (int, float)) else None
+
+
+def renew_claude_session_with_cli() -> bool:
+    before = claude_credential_state()
+    try:
+        master, slave = pty.openpty()
+    except OSError:
+        return False
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        try:
+            process = subprocess.Popen(
+                ["claude", "--safe-mode"],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                cwd=Path.home(),
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError:
+            return False
+        finally:
+            os.close(slave)
+        os.set_blocking(master, False)
+        deadline = time.monotonic() + CLAUDE_SESSION_RENEW_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                while os.read(master, 4096):
+                    pass
+            except (BlockingIOError, OSError):
+                pass
+            current = claude_credential_state()
+            if current is not None and current != before:
+                expires_at = current[1]
+                if isinstance(expires_at, (int, float)) and expires_at / 1000 > time.time():
+                    return True
+            if process.poll() is not None:
+                return False
+            time.sleep(0.25)
+        return False
+    finally:
+        if process is not None:
+            stop_process(process)
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
+def process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def stop_process(process: subprocess.Popen[Any]) -> None:
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        pass
+    deadline = time.monotonic() + 0.8
+    while process_group_exists(process_group) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if process_group_exists(process_group):
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
         process.wait(timeout=1)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def fetch_codex() -> dict[str, Any]:
@@ -407,6 +488,15 @@ def refresh_cache(blocking_lock: bool = True, force: bool = False) -> tuple[dict
                     refreshed["nextRefreshAt"] = now + interval
                     providers[provider_id] = refreshed
                 except Exception as error:
+                    if force and provider_id == "claude" and isinstance(error, UsageAuthError):
+                        try:
+                            if renew_claude_session_with_cli():
+                                refreshed = fetch_claude()
+                                refreshed["nextRefreshAt"] = now + interval
+                                providers[provider_id] = refreshed
+                                continue
+                        except Exception as retry_error:
+                            error = retry_error
                     prior = providers.get(provider_id)
                     base = dict(prior) if isinstance(prior, dict) else {
                         "name": provider_id.title(),

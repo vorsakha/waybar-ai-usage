@@ -114,7 +114,7 @@ The exact module and styles installed by the script are available in [`waybar/mo
 
 ## Data sources
 
-Claude is read from Anthropic's OAuth usage endpoint. Because that endpoint is aggressively rate limited, Claude is polled no more than hourly and the popup clearly notes that its values may be delayed. HTTP `429 Retry-After` responses are persisted and honored. If Claude Code's access token expires, the popup asks you to open Claude Code to renew the session rather than modifying OAuth credentials itself. Codex refreshes every ten minutes through the official `codex app-server` JSON-RPC method `account/rateLimits/read`, the same live data source used for Codex status displays. Transient Codex failures retry after one minute, which lets the module recover when Waybar starts before login services or networking are ready.
+Claude is read from Anthropic's OAuth usage endpoint. Because that endpoint is aggressively rate limited, Claude is polled no more than hourly and the popup clearly notes that its values may be delayed. HTTP `429 Retry-After` responses are persisted and honored. If a user-initiated refresh finds that Claude Code's session expired, the app starts Claude Code briefly in a background pseudo-terminal, waits for Claude Code to renew its own session, stops it, and retries the usage request. It never sends a prompt and never writes OAuth credentials itself. Codex refreshes every ten minutes through the official `codex app-server` JSON-RPC method `account/rateLimits/read`, the same live data source used for Codex status displays. Transient Codex failures retry after one minute, which lets the module recover when Waybar starts before login services or networking are ready.
 
 ## Contributing
 

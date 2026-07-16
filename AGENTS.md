@@ -43,7 +43,7 @@ Runtime state:
 - Refresh Codex at most every ten minutes and Claude at most hourly during automatic polling.
 - Manual refresh bypasses ordinary provider deadlines but never an active Claude `Retry-After` backoff.
 - Retry transient Codex failures after one minute so boot-time network races recover automatically.
-- Do not refresh or mutate Claude OAuth credentials; show an actionable session-expired state instead.
+- Never write Claude OAuth credentials directly. Only after a user-initiated refresh receives `401`, Claude Code may be started in a short-lived background pseudo-terminal so it renews its own session; never send it a prompt, and always terminate the process tree.
 - Provider collection runs concurrently.
 - Failed refreshes retain prior values and clearly mark them stale or conservatively delayed.
 - Never label cached values as freshly updated after a failed refresh.
