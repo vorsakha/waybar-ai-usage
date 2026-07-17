@@ -633,6 +633,15 @@ def data_freshness_text(data: dict[str, Any]) -> str:
     return f"Updated {data_age}" if timestamps else "Not updated"
 
 
+def selected_provider_window(provider: dict[str, Any] | None) -> dict[str, Any] | None:
+    windows = provider.get("windows") if isinstance(provider, dict) and isinstance(provider.get("windows"), dict) else {}
+    for window_id in ("fiveHour", "weekly"):
+        window = windows.get(window_id)
+        if isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float)):
+            return window
+    return None
+
+
 def usage_state(data: dict[str, Any]) -> tuple[str, float, bool]:
     providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
     percents: list[float] = []
@@ -648,10 +657,9 @@ def usage_state(data: dict[str, Any]) -> tuple[str, float, bool]:
         stale_after = CLAUDE_STALE_AFTER_SECONDS if provider_id == "claude" else CODEX_STALE_AFTER_SECONDS
         if provider.get("stale") or not isinstance(updated_at, (int, float)) or time.time() - updated_at > stale_after:
             stale = True
-        windows = provider.get("windows") if isinstance(provider.get("windows"), dict) else {}
-        for window in windows.values():
-            if isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float)):
-                percents.append(float(window["usedPercent"]))
+        selected = selected_provider_window(provider)
+        if selected is not None:
+            percents.append(float(selected["usedPercent"]))
     highest = max(percents, default=0)
     if failures and failures >= max(1, len(providers)) and not percents:
         return "error", highest, stale
@@ -691,19 +699,13 @@ def compact_time_remaining(timestamp: Any) -> str:
 
 def compact_provider_text(provider_id: str, provider: dict[str, Any] | None, settings: dict[str, Any]) -> str:
     icon, color = PROVIDER_DISPLAY[provider_id]
-    windows = provider.get("windows") if isinstance(provider, dict) and isinstance(provider.get("windows"), dict) else {}
-    available = [
-        window
-        for window in windows.values()
-        if isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float))
-    ]
+    selected = selected_provider_window(provider)
     parts: list[str] = []
-    if available:
-        active = max(available, key=lambda window: float(window["usedPercent"]))
+    if selected is not None:
         if settings["showPercentages"]:
-            parts.append(f'{float(active["usedPercent"]):g}%')
+            parts.append(f'{float(selected["usedPercent"]):g}%')
         if settings["showResetCountdown"]:
-            parts.append(compact_time_remaining(active.get("resetsAt")))
+            parts.append(compact_time_remaining(selected.get("resetsAt")))
     elif settings["showPercentages"] or settings["showResetCountdown"]:
         parts.append("--")
     suffix = f" {' · '.join(parts)}" if parts else ""

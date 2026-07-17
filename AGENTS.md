@@ -49,6 +49,7 @@ Runtime state:
 - Failed refreshes retain prior values and clearly mark them stale or conservatively delayed.
 - Never label cached values as freshly updated after a failed refresh.
 - Keep percentage and reset time tied to the same selected quota window.
+- Select the 5-hour window for compact Waybar output whenever it exists, including a valid `0%`; fall back to weekly only when 5-hour data is unavailable.
 - The Waybar output and settings preview must use the same renderer.
 
 ## Display defaults

@@ -145,6 +145,28 @@ class UsageStateTests(unittest.TestCase):
         self.assertIn("󰚩</span> 1h5m", text)
         self.assertNotIn("42%", text)
 
+    @patch.object(usage.time, "time", return_value=10_000)
+    def test_five_hour_zero_is_selected_instead_of_nonzero_weekly(self, _time):
+        provider = {
+            "name": "Claude",
+            "updatedAt": 9_990,
+            "windows": {
+                "fiveHour": {"usedPercent": 0, "resetsAt": 11_800},
+                "weekly": {"usedPercent": 88, "resetsAt": 97_000},
+            },
+        }
+        selected = usage.selected_provider_window(provider)
+        self.assertIs(selected, provider["windows"]["fiveHour"])
+        text = usage.compact_provider_text("claude", provider, dict(usage.DEFAULT_SETTINGS))
+        self.assertIn("󰚩</span> 0%", text)
+        self.assertNotIn("88%", text)
+        self.assertEqual(usage.usage_state({"providers": {"claude": provider}}), ("normal", 0, False))
+
+    def test_weekly_is_selected_when_five_hour_is_unavailable(self):
+        provider = {"windows": {"weekly": {"usedPercent": 22}}}
+        self.assertIs(usage.selected_provider_window(provider), provider["windows"]["weekly"])
+        self.assertIn("󰚩</span> 22%", usage.compact_provider_text("codex", provider, dict(usage.DEFAULT_SETTINGS)))
+
     def provider(self, updated_at: float, percent: float, **extra):
         return {
             "name": "Provider",
@@ -329,7 +351,7 @@ class UsageStateTests(unittest.TestCase):
         self.assertTrue(usage.usage_state(data)[2])
 
     @patch.object(usage.time, "time", return_value=10_000)
-    def test_waybar_text_shows_each_provider_highest_percentage(self, _time):
+    def test_waybar_text_prefers_five_hour_and_falls_back_to_weekly(self, _time):
         data = {
             "attemptedAt": 9_990,
             "providers": {
@@ -352,11 +374,12 @@ class UsageStateTests(unittest.TestCase):
         ), patch.object(usage, "spawn_background_refresh"), redirect_stdout(output):
             usage.waybar_output()
         payload = json.loads(output.getvalue())
-        self.assertIn("#D97757\">󰚩</span> 34%", payload["text"])
+        self.assertIn("#D97757\">󰚩</span> 12%", payload["text"])
         self.assertIn("#10A37F\">󰚩</span> 56%", payload["text"])
         self.assertNotIn("1d", payload["text"])
         self.assertNotIn("1h5m", payload["text"])
         self.assertEqual(payload["tooltip"], "")
+        self.assertEqual(payload["percentage"], 56)
 
         alternate = {**usage.DEFAULT_SETTINGS, "displayMode": "single", "showTooltip": True}
         output = io.StringIO()

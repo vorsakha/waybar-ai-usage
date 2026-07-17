@@ -2,7 +2,7 @@
 
 A native Waybar indicator and GTK4 layer-shell popup for live Claude and Codex quota.
 
-- At-a-glance Claude and Codex icons with each provider’s highest active usage percentage and reset countdown
+- At-a-glance Claude and Codex icons using each provider’s 5-hour percentage and reset countdown, with weekly fallback when 5-hour data is unavailable
 - Click-to-toggle popup centered below the clicked monitor’s bar
 - Claude and Codex 5-hour/weekly usage and reset countdowns
 - Theme colors loaded from the active Omarchy theme
