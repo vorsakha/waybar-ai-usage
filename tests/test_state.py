@@ -167,6 +167,23 @@ class UsageStateTests(unittest.TestCase):
         self.assertIs(usage.selected_provider_window(provider), provider["windows"]["weekly"])
         self.assertIn("󰚩</span> 22%", usage.compact_provider_text("codex", provider, dict(usage.DEFAULT_SETTINGS)))
 
+    def test_critical_color_is_scoped_to_exhausted_provider(self):
+        providers = {
+            "claude": {"windows": {"fiveHour": {"usedPercent": 100}}},
+            "codex": {"windows": {"weekly": {"usedPercent": 41}}},
+        }
+        text = usage.compact_waybar_text(providers, dict(usage.DEFAULT_SETTINGS))
+        self.assertEqual(
+            text,
+            '<span foreground="#D35F5F">󰚩</span> <span foreground="#D35F5F">100%</span>'
+            '  <span foreground="#10A37F">󰚩</span> 41%',
+        )
+        single = {**usage.DEFAULT_SETTINGS, "displayMode": "single"}
+        self.assertEqual(
+            usage.compact_waybar_text(providers, single, "critical"),
+            '<span foreground="#D35F5F">󰚩</span>',
+        )
+
     def provider(self, updated_at: float, percent: float, **extra):
         return {
             "name": "Provider",

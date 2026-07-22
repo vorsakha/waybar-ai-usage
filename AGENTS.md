@@ -51,6 +51,7 @@ Runtime state:
 - Keep percentage and reset time tied to the same selected quota window.
 - Select the 5-hour window for compact Waybar output whenever it exists, including a valid `0%`; fall back to weekly only when 5-hour data is unavailable.
 - The Waybar output and settings preview must use the same renderer.
+- Warning and critical colors are provider-local; one exhausted provider must never tint another provider's readout.
 
 ## Display defaults
 

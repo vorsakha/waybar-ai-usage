@@ -7,7 +7,7 @@ A native Waybar indicator and GTK4 layer-shell popup for live Claude and Codex q
 - Claude and Codex 5-hour/weekly usage and reset countdowns
 - Theme colors loaded from the active Omarchy theme
 - Ten-minute Codex refresh and conservative hourly Claude refresh
-- Explicit stale and provider-error states
+- Explicit stale and provider-error states, with warning colors scoped to only the affected provider
 - Right-click manual retry with a notification; active Anthropic rate-limit backoff remains enforced
 
 ## Preview

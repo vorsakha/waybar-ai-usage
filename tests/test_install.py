@@ -31,6 +31,12 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('"on-click": "$HOME/.local/bin/waybar-ai-usage popup"', module)
         self.assertIn('"on-click-right": "$HOME/.local/bin/waybar-ai-usage refresh --notify"', module)
 
+    def test_shipped_css_does_not_globally_tint_provider_warning_states(self):
+        css = (Path(__file__).parents[1] / "waybar" / "style.css").read_text()
+        self.assertNotIn("#custom-ai-usage.warning", css)
+        self.assertNotIn("#custom-ai-usage.critical", css)
+        self.assertIn("#custom-ai-usage.error", css)
+
     def sample(self):
         return '''{
   // Waybar comment

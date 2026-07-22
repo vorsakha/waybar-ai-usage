@@ -31,6 +31,8 @@ PROVIDER_DISPLAY = {
     "claude": (ICON, "#D97757"),
     "codex": (ICON, "#10A37F"),
 }
+WARNING_COLOR = "#FFC107"
+CRITICAL_COLOR = "#D35F5F"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "displayMode": "providers",
     "showPercentages": True,
@@ -701,19 +703,33 @@ def compact_provider_text(provider_id: str, provider: dict[str, Any] | None, set
     icon, color = PROVIDER_DISPLAY[provider_id]
     selected = selected_provider_window(provider)
     parts: list[str] = []
+    state_color: str | None = None
     if selected is not None:
+        percent = float(selected["usedPercent"])
+        if percent >= 90:
+            state_color = CRITICAL_COLOR
+        elif percent >= 75:
+            state_color = WARNING_COLOR
         if settings["showPercentages"]:
-            parts.append(f'{float(selected["usedPercent"]):g}%')
+            parts.append(f"{percent:g}%")
         if settings["showResetCountdown"]:
             parts.append(compact_time_remaining(selected.get("resetsAt")))
     elif settings["showPercentages"] or settings["showResetCountdown"]:
         parts.append("--")
-    suffix = f" {' · '.join(parts)}" if parts else ""
-    return f'<span foreground="{color}">{icon}</span>{suffix}'
+    icon_color = state_color or color
+    suffix_text = " · ".join(parts)
+    if suffix_text and state_color:
+        suffix = f' <span foreground="{state_color}">{suffix_text}</span>'
+    else:
+        suffix = f" {suffix_text}" if suffix_text else ""
+    return f'<span foreground="{icon_color}">{icon}</span>{suffix}'
 
 
-def compact_waybar_text(providers: dict[str, Any], settings: dict[str, Any]) -> str:
+def compact_waybar_text(providers: dict[str, Any], settings: dict[str, Any], state: str | None = None) -> str:
     if settings["displayMode"] == "single":
+        if state in ("warning", "critical"):
+            state_color = WARNING_COLOR if state == "warning" else CRITICAL_COLOR
+            return f'<span foreground="{state_color}">{ICON}</span>'
         return ICON
     spacing = "  " if settings["providerSpacing"] == "compact" else "   "
     return spacing.join(
@@ -744,7 +760,7 @@ def waybar_output() -> None:
     classes = [state]
     if stale:
         classes.append("stale")
-    compact_text = compact_waybar_text(providers, settings)
+    compact_text = compact_waybar_text(providers, settings, state)
     print(json.dumps({
         "text": compact_text,
         "tooltip": "\n".join(tooltip_lines) if settings["showTooltip"] else "",
@@ -970,7 +986,7 @@ def run_popup() -> None:
                 lambda control, _property: self.update_setting("showPercentages", control.get_active()),
             )
             self.setting_controls["showPercentages"] = percentages
-            panel.append(self.setting_row("Percentages", "Show the most-used active window", percentages))
+            panel.append(self.setting_row("Percentages", "Show 5-hour usage, or weekly when unavailable", percentages))
 
             countdown = Gtk.Switch(active=self.settings["showResetCountdown"])
             countdown.connect(
@@ -1011,7 +1027,8 @@ def run_popup() -> None:
                 return
             data = read_json(CACHE_FILE) or empty_cache()
             providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
-            self.preview_label.set_markup(compact_waybar_text(providers, self.settings))
+            state, _highest, _stale = usage_state(data)
+            self.preview_label.set_markup(compact_waybar_text(providers, self.settings, state))
 
         def update_setting(self, key: str, value: Any) -> None:
             if self.updating_settings:
