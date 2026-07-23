@@ -175,7 +175,7 @@ class UsageStateTests(unittest.TestCase):
         text = usage.compact_waybar_text(providers, dict(usage.DEFAULT_SETTINGS))
         self.assertEqual(
             text,
-            '<span foreground="#D35F5F">󰚩</span> <span foreground="#D35F5F">100%</span>'
+            '<span foreground="#D97757">󰚩</span> <span foreground="#D35F5F">100%</span>'
             '  <span foreground="#10A37F">󰚩</span> 41%',
         )
         single = {**usage.DEFAULT_SETTINGS, "displayMode": "single"}

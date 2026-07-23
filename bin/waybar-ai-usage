@@ -716,13 +716,12 @@ def compact_provider_text(provider_id: str, provider: dict[str, Any] | None, set
             parts.append(compact_time_remaining(selected.get("resetsAt")))
     elif settings["showPercentages"] or settings["showResetCountdown"]:
         parts.append("--")
-    icon_color = state_color or color
     suffix_text = " · ".join(parts)
     if suffix_text and state_color:
         suffix = f' <span foreground="{state_color}">{suffix_text}</span>'
     else:
         suffix = f" {suffix_text}" if suffix_text else ""
-    return f'<span foreground="{icon_color}">{icon}</span>{suffix}'
+    return f'<span foreground="{color}">{icon}</span>{suffix}'
 
 
 def compact_waybar_text(providers: dict[str, Any], settings: dict[str, Any], state: str | None = None) -> str:
